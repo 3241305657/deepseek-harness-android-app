@@ -207,14 +207,20 @@ cat > "$P/staging/bin/bash" <<'EOF'
 #   `--noprofile --norc -i`（bash 专有长参数），mksh 遇到就直接报错退出
 #   ⇒ 终端页建起来立即 state=exited（“建了但用不了”）。
 #   `-i` 等 mksh 认的参数原样保留。
-args=""
-for a in "$@"; do
-  case "$a" in
-    --noprofile|--norc|--login|--posix|--restricted|--noprofile*|-l) ;;
-    *) args="$args $a" ;;
+# 🔴 v1.19.2 修（用户实测："bash 工具在第一个空格处截断"）：
+#   旧实现把参数拼成字符串 `args="$args $a"` 再 `exec /system/bin/sh $args` ——
+#   未加引号的展开会**再做一次 word-split**，于是
+#       bash -c 'touch probe1'      ⇒   sh -c touch probe1
+#   `-c` 只拿到 "touch"、"probe1" 变成 $0 ⇒ 看上去就是"命令在第一个空格处被截断"；
+#   引号救不了（切分发生在字符串层），而 ${IFS} 反而能绕过（它确实不是空格）。
+#   正确做法：只在**开头**剥掉 bash 专有长参数，其余用 "$@" 原样透传（argv 边界不丢）。
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --noprofile|--norc|--login|--posix|--restricted|--noprofile=*|-l) shift ;;
+    *) break ;;
   esac
 done
-exec /system/bin/sh $args
+exec /system/bin/sh "$@"
 EOF
 chmod +x "$P/staging/bin/bash"
 # 内置 pnpm（v1.15.3）：插件管理的「添加插件」全程 pnpm add，而 payload 原本不带 pnpm → 退出码 127，

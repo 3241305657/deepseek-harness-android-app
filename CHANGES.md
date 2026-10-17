@@ -7,6 +7,18 @@
 > 并把 **`behavior` 五字段**与 **`http`/`intent`/`prompt` 动作**真正接上、**悬浮窗图标纳入主题体系**。
 > versionCode **55**（上一版 54），内核仍 **DSH 0.2.0-rc.2**；同签名覆盖安装，**配置 / 会话 / 插件都不丢**。
 
+### 🔧 2026-10-17 热修（同一版号内替换安装包 · versionCode 54 → 56）
+
+**bash 工具的命令会在第一个空格处被截断** —— 这是会让 AI 完全没法执行命令的严重缺陷：
+
+- 现象：`touch probe1` → `touch: Needs 1 argument`；`ls art` → 列的是当前目录；
+  `date '+%Y-%m-%d %H:%M:%S'` → 报引号未闭合；用 `${IFS}` 代替空格反而能绕过。
+- 根因：payload 的 `bin/bash` shim 把 argv 拼成一个字符串再 `exec /system/bin/sh $args`，
+  **未加引号的展开又做了一次 word-split** ⇒ `bash -c 'touch probe1'` 变成 `sh -c touch probe1`。
+- 修法：只在开头剥掉 bash 专有长参数，其余用 `"$@"` 原样透传。
+- 判据：把 **APK 包里那份 shim** 抠出来跑真实用例 5/5 通过；同组用例跑旧 shim 0/5。
+- 三套包都重编（vc 56），资产已就地替换到 v1.19.1 Release，**没有新建 Release**。
+
 ### 一、终端：三个根因（v1.19.7 / v1.19.8）
 
 **1）终端页打不开（v1.19.7）** —— 真机报 `subprocess-local: command "…/com.termux/…/bash" is not an executable file`。
