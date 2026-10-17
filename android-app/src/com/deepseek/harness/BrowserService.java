@@ -26,7 +26,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.webkit.WebView;;
+import android.webkit.WebView;
 import android.widget.FrameLayout;
 
 import org.json.JSONObject;
@@ -164,7 +164,7 @@ public class BrowserService extends Service {
 
         // 阶段 C「只读同屏」：把承载窗变可见，让人能看见 AI 正在点哪一页。
         // ⚠ 只切可见性 —— **绝不动窗口尺寸**（WebView 尺寸一变，CSS 视口与点击坐标口径全变），
-        //    也**保持 NOT_TOUCHABLE**（触摸穿透到下面，用户照样能操作控制台；这是"只读"的定义）。
+//    v1.19.7 起承载窗可触摸：拖顶部小条搬窗、点小条关掉，画面里的网页可直接操作。
         //
         // v1.19.6 收口（控制台入口）后补齐三条不变式：
         //   ① `panel.state` = **纯状态查询** —— 绝不 ensureHost()（否则"打开控制台看一眼"
@@ -204,7 +204,7 @@ public class BrowserService extends Service {
                 reply(msg, err("browser-process-error", String.valueOf(t.getMessage())));
                 return;
             }
-            reply(msg, panelStateJson("只读同屏：能看不能点（触摸穿透到下面）"));
+            reply(msg, panelStateJson("同屏查看：画面可直接操作（拖顶部小条搬窗、点小条关掉）"));
             return;
         }
 

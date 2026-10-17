@@ -3,12 +3,23 @@
   "name": "海边的夜（示例主题）",
   "author": "示例 · 可直接改",
   "app": "1.17.3+",
-
   "appearance": {
     "dark": "dark",
     "perScheme": {
-      "dark":  { "bg": "#0a0d12", "card": "#141a23", "text": "#f2f6ff", "sub": "#a9b4c6", "line": "#26303f" },
-      "light": { "bg": "#f7f9fc", "card": "#ffffff", "text": "#101724", "sub": "#6b7686", "line": "#e3e8ef" }
+      "dark": {
+        "bg": "#0a0d12",
+        "card": "#141a23",
+        "text": "#f2f6ff",
+        "sub": "#a9b4c6",
+        "line": "#26303f"
+      },
+      "light": {
+        "bg": "#f7f9fc",
+        "card": "#ffffff",
+        "text": "#101724",
+        "sub": "#6b7686",
+        "line": "#e3e8ef"
+      }
     },
     "colors": {
       "accent": "#2dd4bf",
@@ -29,17 +40,26 @@
       "dim": 0.28,
       "blur": 0,
       "parallax": false
-    }
+    },
+    "overlayIcon": "overlay-icon.png"
   },
-
   "layout": {
-    "order": ["extract", "engine", "rescue", "perm", "plugins", "log", "update"],
-    "hidden": ["update"],
+    "order": [
+      "extract",
+      "engine",
+      "rescue",
+      "perm",
+      "plugins",
+      "log",
+      "update"
+    ],
+    "hidden": [
+      "update"
+    ],
     "defaultPage": 0,
     "detailOpen": false,
     "compact": false
   },
-
   "text": {
     "title.brand": "DEEPSEEK HARNESS",
     "card.extract": "文件",

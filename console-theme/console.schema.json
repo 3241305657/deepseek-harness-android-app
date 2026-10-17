@@ -144,6 +144,10 @@
               "description": "滚动时背景是否跟随"
             }
           }
+        },
+        "overlayIcon": {
+          "$ref": "#/$defs/imageRef",
+          "description": "悬浮窗（小鲸鱼）图标：图片文件名（随主题包分发，与 console.json 同目录）或 /sdcard/… 路径；不写=内置小鲸鱼"
         }
       }
     },
@@ -206,7 +210,7 @@
     "behavior": {
       "type": "object",
       "additionalProperties": false,
-      "description": "⏭ 下一轮生效",
+      "description": "✅ 已生效（v1.19.7）：默认动作 —— autoExtract（关闭后启动引擎不再自动解压）/ autoStartEngine / enterMainUi / hideButtons / doubleBackExit",
       "properties": {
         "autoExtract": {
           "type": "boolean",
@@ -246,7 +250,7 @@
     },
     "actions": {
       "type": "array",
-      "description": "✅ 已生效（v1.17.7）：自定义按钮 —— 主控台会多出一张「自定义按钮」卡片；shell 可执行（点击时先弹确认），http/intent/prompt 还没接执行",
+      "description": "✅ 已生效（v1.19.7）：自定义按钮 —— 主控台会多出一张「自定义按钮」卡片；shell / http / intent / prompt 四类都可执行（点击时先弹确认框，把命令 / 网址 / 请求头 / Intent / 提示词原样摆出来）",
       "items": {
         "$ref": "#/$defs/action"
       }

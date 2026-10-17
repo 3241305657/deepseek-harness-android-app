@@ -85,6 +85,12 @@ final class ConsoleTheme {
             "method", "body", "headers"};
     private static final String[] LAY_KEYS =
             {"order", "hidden", "defaultPage", "detailOpen", "compact", "pages", "style"};
+    /** behavior 的合法字段（与 schema / 离线校验器一致）。 */
+    private static final String[] BH_KEYS =
+            {"autoExtract", "autoStartEngine", "enterMainUi", "hideButtons", "doubleBackExit"};
+    /** behavior.hideButtons 可隐藏的按钮名（与 schema 的 enum 一致）。 */
+    private static final String[] BH_BUTTONS =
+            {"restart", "stop", "verify", "export", "import", "safeMode", "update", "resetTheme"};
     private static final String[] CARD_IDS =
             {"extract", "engine", "rescue", "actions", "browser", "perm", "plugins", "log", "update", "theme", "selfcheck",
              // v1.19.7（新版骨架吃主题布局）：新版骨架（缺省那套）的条目 id。
@@ -139,7 +145,8 @@ final class ConsoleTheme {
     /** 一条自定义按钮（`actions[]` 里的一项）。 */
     static final class Act {
         String id, label, type;
-        String cmd, url, action, data, pkg, text, copy, method, body;
+        String cmd, url, action, data, pkg, text, copy, method, body, session, mode;
+        java.util.Map<String, String> headers = null;   // http: 请求头（schema：object，值必须是字符串）
         boolean confirm = true;        // shell 默认要二次确认
         boolean privileged = false;    // shell: 走 Shizuku/root
         boolean external = true;       // url: 用外部浏览器
@@ -179,6 +186,13 @@ final class ConsoleTheme {
     final java.util.List<Act> actions = new ArrayList<Act>();
     /** 其中"可执行动作"的摘要（主题页第④块显示用）：形如 "shell：重启服务器"。 */
     final java.util.List<String> execActions = new ArrayList<String>();
+    // ---- behavior（v1.19.7 起真生效）：默认动作 ----
+    boolean bhPresent = false;                 // 配置里写了 behavior（写了才覆盖默认）
+    boolean bhAutoExtract = true;              // 冷启动自动解压
+    boolean bhAutoStartEngine = false;         // 解压完成后自动启动引擎
+    boolean bhEnterMainUi = false;             // 引擎就绪后直接进主界面（跳过控制台）
+    boolean bhDoubleBackExit = true;           // 连按两次返回才退出（防误触）
+    final java.util.List<String> bhHideButtons = new ArrayList<String>();  // 隐藏这些按钮
     // ---- text（文案覆盖：键 → 新文案，≤40 字）----
     private final Map<String, String> texts = new HashMap<String, String>();
     Bg background = null;
@@ -607,6 +621,69 @@ final class ConsoleTheme {
             }
         }
 
+        // ---- behavior：默认动作（v1.19.7 起真生效）----
+        // 与 schema / 离线校验器同一套：autoExtract / autoStartEngine / enterMainUi /
+        // hideButtons（restart|stop|verify|export|import|safeMode|update|resetTheme）/ doubleBackExit。
+        // 写错的值一律单项回退并给 warning，绝不影响其他层。
+        Object bhv = o.opt("behavior");
+        if (bhv != null) {
+            if (!(bhv instanceof JSONObject)) {
+                revert("$.behavior", "应为对象");
+            } else {
+                JSONObject bh = (JSONObject) bhv;
+                bhPresent = true;
+                for (Iterator<String> it = bh.keys(); it.hasNext(); ) {
+                    String k = it.next();
+                    if (!in(BH_KEYS, k)) warn("$.behavior." + k + " 是未知字段（已忽略）");
+                }
+                Object ae = bh.opt("autoExtract");
+                if (ae != null) {
+                    if (ae instanceof Boolean) bhAutoExtract = ((Boolean) ae).booleanValue();
+                    else revert("$.behavior.autoExtract", "应为 true / false");
+                }
+                Object as = bh.opt("autoStartEngine");
+                if (as != null) {
+                    if (as instanceof Boolean) bhAutoStartEngine = ((Boolean) as).booleanValue();
+                    else revert("$.behavior.autoStartEngine", "应为 true / false");
+                }
+                Object eu = bh.opt("enterMainUi");
+                if (eu != null) {
+                    if (eu instanceof Boolean) bhEnterMainUi = ((Boolean) eu).booleanValue();
+                    else revert("$.behavior.enterMainUi", "应为 true / false");
+                }
+                Object db = bh.opt("doubleBackExit");
+                if (db != null) {
+                    if (db instanceof Boolean) bhDoubleBackExit = ((Boolean) db).booleanValue();
+                    else revert("$.behavior.doubleBackExit", "应为 true / false");
+                }
+                Object hb = bh.opt("hideButtons");
+                if (hb != null) {
+                    if (hb instanceof org.json.JSONArray) {
+                        org.json.JSONArray arr = (org.json.JSONArray) hb;
+                        for (int i = 0; i < arr.length(); i++) {
+                            String id = arr.optString(i, null);
+                            if (id == null || !in(BH_BUTTONS, id)) {
+                                revert("$.behavior.hideButtons[" + i + "]", "未知按钮 \"" + id + "\"");
+                            } else if (!bhHideButtons.contains(id)) {
+                                bhHideButtons.add(id);
+                            }
+                        }
+                    } else {
+                        revert("$.behavior.hideButtons", "应为数组");
+                    }
+                }
+                if (!bhHideButtons.isEmpty()) {
+                    StringBuilder jb = new StringBuilder();
+                    for (int i = 0; i < bhHideButtons.size(); i++) {
+                        if (i > 0) jb.append("、");
+                        jb.append(bhHideButtons.get(i));
+                    }
+                    notes.add("behavior.hideButtons：已隐藏 " + bhHideButtons.size() + " 个按钮（"
+                            + jb + "）—— 「救援」与「界面主题」入口本身不参与隐藏");
+                }
+            }
+        }
+
         // ---- text：文案覆盖（第 4 步，v1.17.5 起生效）----
         Object tv = o.opt("text");
         if (tv != null) {
@@ -664,7 +741,7 @@ final class ConsoleTheme {
                 }
             }
         }
-        if (o.has("behavior")) notes.add("behavior 尚未生效（只解析）");
+        if (o.has("behavior")) notes.add("behavior 已生效（v1.19.7）：自动解压 / 自动启引擎 / 直进主界面 / 隐藏按钮 / 双击退出");
     }
 
     private void checkColors(JSONObject obj, String path, Map<String, Integer> into) {
@@ -808,6 +885,23 @@ final class ConsoleTheme {
         t.copy = optStr(a, "copy", 40);
         t.method = optStr(a, "method", 10);
         t.body = optStr(a, "body", 4000);
+        t.session = optStr(a, "session", 200);
+        t.mode = optStr(a, "mode", 40);
+        JSONObject h = a.optJSONObject("headers");
+        if (h != null) {
+            java.util.Map<String, String> hs = new java.util.LinkedHashMap<String, String>();
+            for (Iterator<String> it = h.keys(); it.hasNext(); ) {
+                String k = it.next();
+                String v = h.optString(k, null);
+                if (v == null) { revert(path + ".headers." + k, "请求头的值必须是字符串"); return null; }
+                if (k.length() == 0 || k.length() > 100 || v.length() > 2000) {
+                    revert(path + ".headers." + k, "请求头键最长 100、值最长 2000");
+                    return null;
+                }
+                hs.put(k, v);
+            }
+            if (!hs.isEmpty()) t.headers = hs;
+        }
         Object o1 = a.opt("confirm");        if (o1 instanceof Boolean) t.confirm = ((Boolean) o1).booleanValue();
         Object o2 = a.opt("privileged");     if (o2 instanceof Boolean) t.privileged = ((Boolean) o2).booleanValue();
         Object o3 = a.opt("external");       if (o3 instanceof Boolean) t.external = ((Boolean) o3).booleanValue();
@@ -1040,7 +1134,7 @@ final class ConsoleTheme {
         return Color.parseColor(v);
     }
 
-    /** 字符偏移 → {行, 列}（1 基），用于把 JSON 语法错报到人能看懂的位置。 */
+    /** 字符偏移 → {行， 列}（1 基），用于把 JSON 语法错报到人能看懂的位置。 */
     private static int[] lineCol(String text, int offset) {
         int line = 1, col = 1;
         int n = Math.min(Math.max(offset, 0), text.length());

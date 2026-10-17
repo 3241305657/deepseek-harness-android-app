@@ -22,7 +22,10 @@ def mk(name, cfg, theme=None, img=True, extra=False):
     with zipfile.ZipFile(p, "w") as z:
         z.writestr("console.json", json.dumps(cfg, ensure_ascii=False, indent=2))
         z.writestr("theme.json", json.dumps(theme or {"schema": 1, "name": "自测主题", "author": "test"}, ensure_ascii=False))
-        if img: z.writestr("bg.jpg", PNG)
+        if img:
+            z.writestr("bg.jpg", PNG)
+            # v1.19.8：示例里的 appearance.overlayIcon 指向这张图 —— 主题包必须自带它
+            z.writestr("overlay-icon.png", PNG)
         if extra: z.writestr("README.md", "打包时多塞的文件，应被忽略")
     return p
 

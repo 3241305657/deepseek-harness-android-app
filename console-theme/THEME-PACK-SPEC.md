@@ -12,6 +12,8 @@
 4. 自检：`python3 theme_pack_check.py mytheme.zip` → 必须 `通过 ✓`；
 5. 交付给用户：他在 **控制台 →「主题」页 → 导入主题包** 选中这个 zip。
 
+> **可选能力**：主题包还能带**悬浮窗（小鲸鱼）图标** —— 图片放进包里、`appearance.overlayIcon` 写文件名即可（详见 §4.8）。不写就一直是内置小鲸鱼。
+
 > 也可以**不打包**：直接把 `console.json` 放进 `/sdcard/DeepSeekHarness/console/` 就生效（AI 直接写文件时最省事）。
 
 ## 1. 文件放在哪
@@ -21,6 +23,7 @@
 ├── console/
 │   ├── console.json          ← 唯一真相来源（schema 1）
 │   ├── bg.jpg / logo.png     ← 可选：背景图 / 品牌图标
+│   ├── overlay-icon.png      ← 可选：悬浮窗图标（**新用法**：图片随主题包放这里，由 console.json 的 appearance.overlayIcon 指到；§4.8）
 │   ├── console.json.bak      ← App 每次成功加载前自动备份
 │   ├── last-error.txt        ← 最近一次回退的原因
 │   └── THEME-PACK-SPEC.md · console.schema.json · theme_pack_check.py   ← 本规范三件套（随 APK 落盘）
@@ -36,7 +39,7 @@
 mytheme.zip
 ├── console.json     必需   配置本体（≤512KB）
 ├── theme.json       可选   {"schema":1,"name":"主题名","author":"你","app":"1.17.3+"}（≤8KB）
-└── bg.jpg           可选   背景图 / logo（PNG·JPG·WebP，单张 ≤2MB）
+└── bg.jpg           可选   背景图 / logo / 悬浮窗图标（PNG·JPG·WebP，单张 ≤2MB）
 ```
 
 **打包容错（故意放宽，避免 AI 生成的包被无谓拒绝）**：
@@ -46,7 +49,7 @@ mytheme.zip
 | 只有 `console.json`，没有 `theme.json` | ✅（主题名取 `console.json` 的 `name` 或文件名） |
 | 多塞了 `README.md`、`LICENSE` 等 | ✅（忽略，自检里提示一句） |
 | 包了一层目录（`mytheme/console.json`） | ✅ |
-| 背景图/logo 用 `/sdcard/...` 绝对路径 | ✅（但换设备会失效，自检里会提示） |
+| 背景图/logo/悬浮窗图标 用 `/sdcard/...` 绝对路径 | ✅（但换设备会失效，自检里会提示） |
 | 没打包，直接给 `console.json` | ✅ |
 
 **打包命令**（任选）：
@@ -76,6 +79,7 @@ python3 -c "import zipfile;z=zipfile.ZipFile('mytheme.zip','w');[z.write(f) for 
     "radius": 14,                  // 0~32（卡片/按钮圆角 dp）
     "mono": false,                 // 日志页等宽字体
     "logo": "logo.png",            // 品牌图标（相对 console/ 或 /sdcard/…）
+    "overlayIcon": "overlay-icon.png",   // 悬浮窗（小鲸鱼）图标；不写=内置小鲸鱼（见 §4.8）
     "cardsAlpha": 1.0,             // 0~1 卡片不透明度（放背景图时调低）
     "background": {                // 背景图
       "image": "bg.jpg",           // 文件名或 /sdcard/… 绝对路径
@@ -353,8 +357,11 @@ v1.19.7 起全部接上：
 - 配了 `actions` → 主控台多出一张**「自定义按钮」卡片**（卡片 id = `actions`，可用 `layout.order`/`hidden` 调整，
   没配 `actions` 时这张卡片不出现）；
 - **哪些现在真的会执行**：内置动作（`engine.*` / `extract.*` / `perm.open` / `log.*` / `theme.*`）、
-  `url`、`clipboard`、`toast`、`settings`、**`shell`**（`privileged: true` 走 Shizuku/root，否则 App 身份执行，结果弹窗展示）；
-- **还没接执行的**：`http`、`intent`、`prompt`（点它会说明"还没接"，`prompt` 会退化成"把提示词复制到剪贴板"）；
+  `url`、`clipboard`、`toast`、`settings`、**`shell`**（`privileged: true` 走 Shizuku/root，否则 App 身份执行，结果弹窗展示）、
+  **`http`**（指定 `method` / `headers` / `body`，结果弹窗展示状态码与响应正文）、
+  **`intent`**（`action` / `data` / `package` 拼出来直接发，发不出去会如实提示）、
+  **`prompt`**（走引擎 RPC 把 `text` 真的发给 AI；`session` 省略=新建会话，`mode` 取 `queue`/`steer`）；
+  ⚠ `prompt` 需要引擎正在运行（它借用引擎的一次性启动令牌换会话 cookie）；发不出去会在结果弹窗里说清原因；
 - **安全**：`shell` / `http` / `intent` / `prompt` 这四类按钮**在界面上是红描边**，
   点击后**先弹确认框**把要执行的内容原样摆出来 —— AI 生成的包不可能静默执行任何东西。
 
@@ -409,14 +416,45 @@ v1.19.7 起全部接上：
 
 > 写了 `pages` 时，`layout.order` / `hidden` 会被忽略（以 `pages` 为准，自检会给 warning）。
 
-## 5. 下一轮才生效的字段（现在写了也**不报错**，会自动等到生效）
+### 4.8 悬浮窗（小鲸鱼）图标（`appearance.overlayIcon`，✅ v1.19.8 起生效）
+
+```json
+"appearance": { "overlayIcon": "overlay-icon.png" }
+```
+
+| 取值 | 含义 |
+|---|---|
+| 图片文件名（如 `overlay-icon.png`） | **随主题包分发**（与 `console.json` 同目录）；导出主题包时会一起打包 |
+| `/sdcard/…` 绝对路径 | 用设备上的文件（不随包分发，换设备失效；自检会提示） |
+| 不写 | 用内置小鲸鱼 |
+
+- **生效时机**：悬浮窗**每次变可见时**按 mtime 重新判断（App 退到后台、按 Home 键就会刷新一次）；
+  换图 / 删图 / 换主题后，**回一次桌面**即可看到。
+- **规格**：PNG / JPG / WebP；**超过 2048px 会自动降采样**（防大图卡顿与 OOM）。
+- **出错一律静默回落内置小鲸鱼**：图不存在、解码失败、主题配置坏掉都不会影响悬浮窗本身。
+- **兼容**：老用法（把 `overlay-icon.png` 直接放在 `/sdcard/<包根目录>/` 下、不写主题字段）
+  **仍然有效**；两者都在时**以主题里的 `overlayIcon` 为准**。
+- 悬浮窗是常驻系统级窗口，图标来源刻意收敛在「主题文件 + 约定路径」两处，**不接受任意 URI**；
+  控制台自身的品牌图标是另一个字段（`appearance.logo`），两者互不影响。
+
+## 5. ✅ 已全部生效（v1.19.7 起，没有"下轮才生效"的字段了）
 
 | 字段 | 用途 | 备注 |
 |---|---|---|
 | `behavior` | 默认动作：`autoExtract` / `autoStartEngine` / `enterMainUi` / `hideButtons` / `doubleBackExit` | 谨慎用 `enterMainUi`（跳过控制台） |
 
-> 校验器对这些只 **note 提示**「v1 只解析不执行」，不算错误 —— 所以 AI 现在就可以生成"完整版"主题包，
-> 等 App 接上对应能力，**同一个包自动升级为可用**。
+`behavior` 逐项语义（写了才覆盖默认，没写就是下面括号里的默认值）：
+
+| 键 | 默认 | 真正做了什么 |
+|---|---|---|
+| `autoExtract` | `true` | `false`：文件没准备好时**不再**自动解压 —— 要先到「运行环境」里点「重新解压」，再启动引擎 |
+| `autoStartEngine` | `false` | `true`：解压完成后**自动接力**启动引擎 |
+| `enterMainUi` | `false` | `true`：冷启动跳过控制台，直接进主界面（引擎起不来时仍会回控制台，出口不变） |
+| `hideButtons` | `[]` | 隐藏这些按钮：`restart` / `stop` / `verify` / `export` / `import` / `safeMode` / `update` / `resetTheme`（「救援」与「界面主题」两颗入口本身不可隐藏） |
+| `doubleBackExit` | `true` | `false`：返回键不再弹退出确认，直接退出 |
+
+> 写错的值一律**单项回退**并给 warning（不会连累其它字段），绝不会因此让控制台打不开。
+> 想反悔：删掉 `/sdcard/<应用目录>/console/console.json`（或改名）就回到内置默认。
 
 ## 6. 五条提示词模板（用户可直接复制给任意 AI）
 
@@ -463,6 +501,23 @@ v1.19.7 起全部接上：
 1) "重启服务器" —— 执行 shell: svc nginx restart（要二次确认）
 2) "整理截图" —— 把提示词"把 /sdcard/Pictures 里今天的截图分类归档"发给 DSH 的 AI
 用 layout.pages / actions 写，其余保持现状。注意这两个是"可执行动作"，我会在导入时确认。
+```
+
+**⑥ 换悬浮窗（小鲸鱼）图标**
+```
+把我这张图（<图片文件名>）设成控制台的悬浮窗图标，其它什么都别动。
+按 THEME-PACK-SPEC 的 §4.8：图片放进主题包里，在 console.json 里加
+  "schema": 1,
+  "appearance": { "overlayIcon": "<图片文件名>" }
+
+要求：
+- 如果我下面贴了**现有的 console.json**，就只在它上面加 overlayIcon 这一行，其余字段一个字都别动；
+  如果我没贴，就用最小配置（顶层必须有 "schema": 1，校验器硬要求）。
+- 图片要和 console.json 放在同一目录、一起打进 zip（单张 ≤2MB，>2048px 会被自动降采样）。
+- 输出：console.json 全文 + 打包命令 + 用 theme_pack_check.py 自检**通过**的原始输出。
+（我不需要 /sdcard 绝对路径的写法；万一图找不到，宁可让它回落内置小鲸鱼，也不要让我自己去找文件。）
+
+<如果已有主题，把 console.json 全文贴在这里；没有就写"无"》
 ```
 
 **⑤ 复制规范全文**

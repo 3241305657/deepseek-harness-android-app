@@ -145,7 +145,7 @@ def check_config(cfg):
         else:
             for k in ap:
                 if k not in ("dark", "colors", "perScheme", "fontScale", "radius", "mono",
-                             "logo", "cardsAlpha", "background"):
+                             "logo", "overlayIcon", "cardsAlpha", "background"):
                     err("$.appearance", f'未知字段 "{k}"')
             if "dark" in ap and ap["dark"] not in ("follow", "light", "dark"):
                 err("$.appearance.dark", '应为 follow / light / dark')
@@ -169,6 +169,9 @@ def check_config(cfg):
                 err("$.appearance.cardsAlpha", "应在 0~1")
             if "logo" in ap and not IMG_REF_RE.match(str(ap["logo"])):
                 err("$.appearance.logo", "应为图片文件名（png/jpg/jpeg/webp）或 /sdcard/… 路径")
+            # v1.19.8：悬浮窗（小鲸鱼）图标纳入主题体系，与控制台外观同一套引用规则
+            if "overlayIcon" in ap and not IMG_REF_RE.match(str(ap["overlayIcon"])):
+                err("$.appearance.overlayIcon", "应为图片文件名（png/jpg/jpeg/webp）或 /sdcard/… 路径")
             bg = ap.get("background")
             if bg is not None:
                 if not isinstance(bg, dict):
@@ -244,9 +247,9 @@ def check_config(cfg):
 
     if "actions" in cfg:
         note('"actions" 已生效（v1.17.7）：主控台会多出一张「自定义按钮」卡片；'
-             'shell 可执行（点击时先弹确认），http/intent/prompt 还没接执行')
+             'shell / http / intent / prompt 四类都可执行（点击时先弹确认框，把原文摆出来）')
     if "behavior" in cfg:
-        note('"behavior" 属于 v1 尚未生效的字段：本轮只解析不执行（校验不报错）')
+        note('"behavior" 已生效（v1.19.7）：autoExtract / autoStartEngine / enterMainUi / hideButtons / doubleBackExit')
     if isinstance(cfg.get("actions"), list):
         for i, a in enumerate(cfg["actions"]):
             check_action(a, f"$.actions[{i}]")
@@ -293,11 +296,13 @@ def load_zip(path):
 
 
 def check_images(cfg, imgs, in_zip=True):
-    """背景图/logo 引用的文件必须在包里（或写成 /sdcard 绝对路径）。
+    """背景图/logo/悬浮窗图标 引用的文件必须在包里（或写成 /sdcard 绝对路径）。
     只校验一份裸 console.json 时没有"包"的概念 → 降级成提示，不报错。"""
     ap = (cfg or {}).get("appearance") or {}
     refs = []
     if isinstance(ap.get("logo"), str): refs.append(("$.appearance.logo", ap["logo"]))
+    # v1.19.8：悬浮窗图标也随主题包分发 → 同样要求包内有这个文件
+    if isinstance(ap.get("overlayIcon"), str): refs.append(("$.appearance.overlayIcon", ap["overlayIcon"]))
     bg = ap.get("background") or {}
     if isinstance(bg.get("image"), str): refs.append(("$.appearance.background.image", bg["image"]))
     base = {os.path.basename(i).lower() for i in imgs}

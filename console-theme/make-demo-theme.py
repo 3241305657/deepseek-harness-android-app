@@ -80,6 +80,9 @@ with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("theme.json", json.dumps(theme, ensure_ascii=False, indent=2))
     z.writestr("console.json", json.dumps(cfg, ensure_ascii=False, indent=2))
     z.write(bg_path, "bg.jpg")
+    # v1.19.8：示例里 appearance.overlayIcon 指向这张图 —— 演示包必须自带它，
+    # 否则校验器会报"引用了 overlay-icon.png，但包里没有"（这正是它该报的）。
+    z.write(bg_path, "overlay-icon.png")
 print(f"主题包已生成：{OUT}  {os.path.getsize(OUT)//1024} KB")
 
 # ---- 4) 自检 ----

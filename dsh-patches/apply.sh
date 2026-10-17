@@ -41,12 +41,13 @@ if (!m.dependencies["@deepseek-ai/dsh-tool-shizuku"]) {
 }
 '
 
-echo "== 语法自检（5 个 JS 补丁）=="
+echo "== 语法自检（6 个 JS 补丁）=="
 for f in \
   "$DST/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js" \
   "$DST/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js" \
   "$DST/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-bash-local/lib/index.js" \
   "$DST/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js" \
+  "$DST/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-model-selection/lib/client.js" \
   "$DST/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-shizuku/lib/index.js" ; do
   if [ -f "$f" ]; then
     if "$NODE" --check "$f" 2>/dev/null; then

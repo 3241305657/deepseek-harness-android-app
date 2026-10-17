@@ -261,6 +261,7 @@ public class OverlayService extends Service {
         iconView.setLayoutParams(new LinearLayout.LayoutParams(dp(40), dp(40)));
         iconRow.addView(iconView);
         rootView.addView(iconRow);
+        refreshOverlayIcon();   // issue #47：外部目录有 overlay-icon.png 就换用户图
 
         // ===== 状态面板（紧凑版，默认隐藏）=====
         panelView = new LinearLayout(this);
@@ -445,8 +446,70 @@ public class OverlayService extends Service {
             if (rootView != null) {
                 boolean show = !foregroundWantsHidden && !userHidden;
                 rootView.setVisibility(show ? View.VISIBLE : View.GONE);
+                if (show) refreshOverlayIcon();   // 每次变可见按 mtime 跟随用户换图
             }
         } catch (Throwable ignored) {}
+    }
+
+    // ==================== 自定义悬浮窗图标（issue #47） ====================
+    // 约定：外部应用根目录（/sdcard/<DeepSeekHarness|DeepSeekHarnessLite|DeepSeekHarnessCompat>/）
+    //   下存在 overlay-icon.png 时，悬浮窗图标用它替换内置小鲸鱼。
+    //  · 只认这一个固定路径（不接任意 URI —— 悬浮窗是常驻系统级窗口，图标来源必须收敛）；
+    //  · PNG/WebP 均可（BitmapFactory 原生支持）；>2048px 先降采样，避免大图 OOM / 拉帧卡顿；
+    //  · 文件缺失 / 解码失败一律静默回落内置鲸鱼 —— 悬浮窗的稳定性比图标好看重要；
+    //  · 文件被替换 / 删除后，下一次可见性刷新时自动跟随（按 mtime 判断；解码放后台线程）。
+    private volatile long overlayIconMtime = -2L;   // 已加载图标的文件 mtime；-2=还没查过，-1=当前是内置图标
+
+    private File overlayIconFile() {
+        try {
+            String p = getPackageName();
+            String root = p.contains("beta") ? "DeepSeekHarnessLite"
+                    : p.contains("compat") ? "DeepSeekHarnessCompat" : "DeepSeekHarness";
+            return new File(android.os.Environment.getExternalStorageDirectory(), root + "/overlay-icon.png");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 按 mtime 决定要不要换图标；需要解码时放后台线程，失败一律回落内置鲸鱼。 */
+    private void refreshOverlayIcon() {
+        final File f = overlayIconFile();
+        long mt = (f != null && f.isFile()) ? f.lastModified() : -1L;
+        if (mt == overlayIconMtime) return;      // 没变化
+        if (mt <= 0) {                            // 文件没了 → 回内置鲸鱼
+            overlayIconMtime = -1L;
+            try { if (iconView != null) iconView.setImageResource(R.drawable.ic_whale_black); } catch (Throwable ignored) {}
+            return;
+        }
+        overlayIconMtime = mt;
+        final long expectMtime = mt;
+        new Thread(new Runnable() { @Override public void run() {
+            final android.graphics.Bitmap bmp = decodeIconBitmap(f);
+            handler.post(new Runnable() { @Override public void run() {
+                if (!isRunning || iconView == null) return;
+                if (overlayIconMtime != expectMtime) return;   // 期间又变了，下一次刷新再处理
+                if (bmp != null) iconView.setImageBitmap(bmp);
+                else { overlayIconMtime = -1L; iconView.setImageResource(R.drawable.ic_whale_black); }
+            }});
+        }}, "overlay-icon").start();
+    }
+
+    /** 解码自定义图标：先读尺寸，>2048px 降采样；任何异常返回 null（调用方回落默认图标）。 */
+    private static android.graphics.Bitmap decodeIconBitmap(File f) {
+        try {
+            android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeFile(f.getAbsolutePath(), bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+            int sample = 1;
+            int maxDim = Math.max(bounds.outWidth, bounds.outHeight);
+            while (maxDim / (sample * 2) > 2048) sample *= 2;
+            android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
+            opts.inSampleSize = sample;
+            return android.graphics.BitmapFactory.decodeFile(f.getAbsolutePath(), opts);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private void addToWindow() {

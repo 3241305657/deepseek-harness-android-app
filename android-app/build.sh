@@ -202,7 +202,19 @@ echo "  会话管理脚本闸门：$ALINES 行 ✓（assets/session-admin.mjs）
 
 cat > "$P/staging/bin/bash" <<'EOF'
 #!/system/bin/sh
-exec /system/bin/sh "$@"
+# Android 没有真正的 bash（只有 toybox/mksh 的 /system/bin/sh），这个 shim 就是转发。
+# ⚠ 为什么要把 bash 专有参数滤掉（v1.19.7 真机实测）：内核的终端后端会传
+#   `--noprofile --norc -i`（bash 专有长参数），mksh 遇到就直接报错退出
+#   ⇒ 终端页建起来立即 state=exited（“建了但用不了”）。
+#   `-i` 等 mksh 认的参数原样保留。
+args=""
+for a in "$@"; do
+  case "$a" in
+    --noprofile|--norc|--login|--posix|--restricted|--noprofile*|-l) ;;
+    *) args="$args $a" ;;
+  esac
+done
+exec /system/bin/sh $args
 EOF
 chmod +x "$P/staging/bin/bash"
 # 内置 pnpm（v1.15.3）：插件管理的「添加插件」全程 pnpm add，而 payload 原本不带 pnpm → 退出码 127，
@@ -480,7 +492,7 @@ fi
 VSC_SRC="$P/src/com/deepseek/harness/vscreen"
 if ! "$JAVA/javac" -source 1.8 -target 1.8 -bootclasspath "$AJ" \
   -classpath "$GEN_CP${CP_SEP}$SHIZUKU_JARS" -d "$P/out/classes" \
-  "$P/src/com/deepseek/harness/MainActivity.java" "$P/src/com/deepseek/harness/ConsoleTheme.java" "$P/src/com/deepseek/harness/EngineService.java" "$P/src/com/deepseek/harness/OverlayService.java" "$P/src/com/deepseek/harness/UsageStatsHelper.java" "$P/src/com/deepseek/harness/AccessibilityService.java" "$P/src/com/deepseek/harness/VsreenBridgeService.java" "$P/src/com/deepseek/harness/LogShareProvider.java" "$P/src/com/deepseek/harness/LocalAuth.java" "$P/src/com/deepseek/harness/BrowserHost.java" "$P/src/com/deepseek/harness/BrowserService.java" "$P/src/com/deepseek/harness/BrowserIpc.java" "$P/src/com/deepseek/harness/KernelSelfCheck.java" "$P/src/com/deepseek/harness/SessionHeal.java" "$P/src/com/deepseek/harness/PayloadScript.java" "$P/src/com/deepseek/harness/SessionAdmin.java" \
+  "$P/src/com/deepseek/harness/MainActivity.java" "$P/src/com/deepseek/harness/ConsoleTheme.java" "$P/src/com/deepseek/harness/EngineService.java" "$P/src/com/deepseek/harness/OverlayService.java" "$P/src/com/deepseek/harness/UsageStatsHelper.java" "$P/src/com/deepseek/harness/AccessibilityService.java" "$P/src/com/deepseek/harness/VsreenBridgeService.java" "$P/src/com/deepseek/harness/LogShareProvider.java" "$P/src/com/deepseek/harness/LocalAuth.java" "$P/src/com/deepseek/harness/BrowserHost.java" "$P/src/com/deepseek/harness/BrowserService.java" "$P/src/com/deepseek/harness/BrowserIpc.java" "$P/src/com/deepseek/harness/KernelSelfCheck.java" "$P/src/com/deepseek/harness/SessionHeal.java" "$P/src/com/deepseek/harness/PayloadScript.java" "$P/src/com/deepseek/harness/SessionAdmin.java" "$P/src/com/deepseek/harness/UserPatches.java" \
   "$VSC_SRC"/*.java \
   "$P/out/gen/com/deepseek/harness/R.java" \
   >"$P/out/javac.log" 2>&1; then
