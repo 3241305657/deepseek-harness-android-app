@@ -1,3 +1,82 @@
+## v1.20.1（2026-10-18）
+
+- **会话列表恢复**：0.2.1-rc.2 内核把会话文件改成 `session.v4.jsonl.zstd`，App 的会话管理/会话修复脚本
+  仍只认旧名，导致控制台显示「0 条会话」。现已兼容新名（并保留旧名），真机 41 条会话可正常列出/修复。
+- **AI 浏览器插件三项改进（AI 测试员真机跑出来的）**：
+  - `browser_snapshot{includeText:true}` 附带可见文本；`browser_click`/`browser_press` 直接回 `newText`；
+  - `pageGeneration` 随 DOM 变化递增（MutationObserver），`click`/`type` 回 `fromGeneration`/`toGeneration`，
+    差分快照不再假阴性；
+  - `browser_read` 命中输入框回 `tag/type/value/placeholder/disabled`；`browser_type` 回 `via`/`dispatched`。
+- **android 插件**：`android_overlay` 回真实窗口可见性（不再 show/hide 同一句）；
+  `android_input` 回 `injected/坐标/屏幕/前台包` 且坐标越界明确失败；`android_package` 列表回 `count/packages`；
+  `android_setting get` 回 `namespace/key/value/range` 并兼容值落 stderr 的通道差异。
+- **shizuku 插件**：`android_setting_app` 增加 `action=get`，`put` 回 `oldValue/newValue`（一次调用完成"记原值→改→还原"）；
+  `android_notify` 回 `posted/visible/evidence`（发完当场用 dumpsys 校验通知栏可见性）。
+- **accessibility 插件**：`android_a11y_status` 回结构化状态并渲染（running / 服务组件 / 前台应用 / 可读控件数 /
+  读屏·手势·截图能力 / API）；`android_tap` 回命中信息（matchedText/bounds/nodeIndex/clickableAncestor +
+  点击后 pageChanged/newTitle，多命中给 candidates）；`android_scroll`/`android_swipe` 回 changed/atEdge
+  （动作前后各读一次屏对比，"到底了"不再被误判成"手势失效"）。
+- **vscreen 插件**：`android_vscreen_launch` 回 package/component/displayId，并用启动前后截图 sha256 给
+  `compared/screenChanged`（命令成功但画面没变时给 hint，不再"假成功"）；`android_vscreen_see` 支持 `waitMs`
+  等首帧并按真实状态回 `errorCode`（no_display / not_rendered / no_frame）+ `hasFrame/displayId/hint`；
+  `android_vscreen_create` 接受 `orientation=0/1/"0"/portrait` 并回 displayId/尺寸/dpi，`android_vscreen_key`
+  支持 `KEYCODE_BACK`/`BACK`/`4` 等别名（未知值回 accepted 清单），`android_vscreen_status` 回 `hasFrame`。
+- **#53**：同一 `(sessionId, atSeq)` 5 秒内的 fork 幂等（真机验证：两次 fork 同一 id，5.5 秒后新 id）。
+- **#54**：悬浮球单击=打开指定应用、长按=创建虚拟屏+预览、双击=收起（含控制台「恢复显示悬浮球」入口）。
+- **#44**：git 系统配置隔离（`GIT_CONFIG_NOSYSTEM`/`GIT_ATTR_NOSYSTEM`/空 system config）。
+- 回归：三套 `verify-v1193.sh` 各 **109 PASS / 0 FAIL**；**全量回归 31 步 OK / 0 步 FAIL，判据合计 772 PASS / 0 FAIL**
+  （2026-10-18 07:31–08:47，含 a11y 与 vscreen 两批插件改动）。
+- 另：两个插件改完后各让设备 AI **自由**再跑一遍（`ai-*/review-after.txt`），报告里直接引用了新字段；
+  这次自由复测又提的 3 条/3 条新建议已落档为下一轮候选（未在本轮实现）。
+
+## v1.20.0（正式版 + Lite 共存版 + 兼容版 · 2026-10-17）
+
+> 本版把内核从 **0.2.0-rc.2 升级到上游最新 0.2.1-rc.2**（旧法重建：hoisted 布局、0 原生模块），
+> 并修掉社区报的三个问题（#44 / #53 / #54）。versionCode **57**（上一版 56）；同签名覆盖安装，
+> 配置 / 会话 / 插件都不丢。
+
+### 一、内核 0.2.1-rc.2
+
+- 上游 0.2.1 的 npm 包开始携带 TypeScript 源码（多出约 290MB）；出货前按「运行时只留 lib」剪枝，
+  APK 只比上一版大 ~3.8MB（158.1 → 162.0MB）。
+- 16 个既有补丁文件全部三方合并到 0.2.1（2 个冲突手工解决：终端 attach 新协议 / subprocess import 并集）；
+  4 个自研插件与 AI 浏览器插件继续随包。
+- 终端协议由 `terminal/follow + terminal/write` 改为 `terminal/attach` 双向流（上游行为，界面无感）。
+
+### 二、#44「插件安装失败 / 没有写入权限」—— 找到真根因
+
+- 报告人日志：`fatal: unable to access '/data/data/com.termux/files/usr/etc/gitconfig': Permission denied`。
+- 内置 git 是 Termux 构建，系统级配置路径被编译死为 Termux 私有目录；设备装了 Termux 时读它 EACCES，
+  插件安装器的 `git ls-remote` 必然失败，而 UI 把 EACCES 兜底显示成「没有写入权限」。
+- 修复：引擎环境加 `GIT_CONFIG_NOSYSTEM=1` / `GIT_ATTR_NOSYSTEM=1` / `GIT_CONFIG_SYSTEM=<payload 内空文件>`。
+- 真机验证：同一路径 `git ls-remote` 正常返回 HEAD。
+
+### 三、#53 同一对话被并发 fork 成多个会话
+
+- 上游 `origin` 字段的 schema 只允许 `subagent`（`z.literal("subagent")`），不能按 issue 建议写 `fork`；
+  实际触发是「分支」按钮连点 / 慢网络重试。
+- 修复：内核 RPC 门面按 **(sessionId, atSeq)** 做 **5 秒幂等**，重复请求复用同一个子会话、返回同一个 id。
+
+### 四、#54 悬浮球动作可配置
+
+- 单击 / 长按 / 双击各自可配：状态面板、打开指定应用、创建虚拟屏（并启动指定应用）、销毁虚拟屏、
+  收起悬浮球、无动作。
+- 控制台「系统 → 悬浮球」三行配置 + 应用列表（本机 114 个可启动应用）；classic 布局在运行环境卡片里也有入口。
+- 拖动 / 拖到底部隐藏保持不变；双击没配动作时单击立即响应（不引入 320ms 延迟）。
+- 「收起」后可从控制台「恢复显示悬浮球」找回（ColorOS 通知栏动作有时不显示）。
+- 真机验证：单击=打开指定应用 ✅、长按=建虚拟屏+预览 ✅、双击=收起 ✅。
+
+### 五、四份同步修复（历史遗漏）
+
+- Lite / compat 的 `OverlayService` / `ConsoleTheme` 缺 v1.19.8「悬浮窗图标纳入主题体系」，本版补齐。
+- 源码树与构建树的 `ConsoleTheme` 差异（46 行）已对齐，避免「GitHub 源码 ≠ 编 APK 的源码」。
+
+### 已知限制
+
+- 终端仍无真 TTY（管道 + JS 行规程）：`resize` 空操作、无 job control、输出可能整块到达。
+- 0.2.1 的 `terminal/attach` 新协议让旧的 app-uid 调试脚本失效；本轮补了 `tmp-diag/v1180/appsh2.py`。
+- compat 只做包内校验，未装机（端口共存限制同前）。
+
 ## v1.19.1（正式版 + Lite 共存版 + 兼容版 · 2026-10-17）
 
 > ⚠️ 这是 **GitHub 上 v1.19.0 之后**的第一次发布（v1.19.0 的发布正文其实覆盖到 v1.19.6）。

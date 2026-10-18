@@ -4036,6 +4036,21 @@ public class MainActivity extends Activity {
         }
         File gitCfg = ensureGitConfig(payload, caBundle);
         if (gitCfg != null) env.put("GIT_CONFIG_GLOBAL", gitCfg.getAbsolutePath());
+        // v1.19.8（#44）：内置 git 是 Termux 构建，系统级配置文件路径被编译死为
+        // /data/data/com.termux/files/usr/etc/gitconfig。设备上装了 Termux 时该文件存在、
+        // 但属于另一个 uid → 读它 EACCES → 任何 git 操作（包括插件安装器的 git ls-remote）
+        // 直接失败；插件管理器又把 EACCES 兜底显示成「没有写入权限」，极难定位。
+        // 我们需要的配置已经全部由 GIT_CONFIG_GLOBAL 给出，这里彻底关掉系统级
+        // config/attributes（不依赖 Termux 是否安装），并给 GIT_CONFIG_SYSTEM 一个可读空文件兜底。
+        env.put("GIT_CONFIG_NOSYSTEM", "1");
+        env.put("GIT_ATTR_NOSYSTEM", "1");
+        File gitSysCfg = new File(new File(payload, "runtime/etc"), "gitconfig-system");
+        try {
+            File sysParent = gitSysCfg.getParentFile();
+            if (sysParent != null && !sysParent.exists()) sysParent.mkdirs();
+            if (!gitSysCfg.exists()) new java.io.FileOutputStream(gitSysCfg).close();
+        } catch (Throwable ignored) {}
+        if (gitSysCfg.exists()) env.put("GIT_CONFIG_SYSTEM", gitSysCfg.getAbsolutePath());
         // v1.16.1:npm 全局安装落点（$HOME/.npm-global/bin）也要在 PATH 上。
         // npm 的默认前缀是 <payload>/runtime(payload 内，升级会被覆盖),所以内置 npm 的 wrapper
         // 把它改到 $HOME/.npm-global(HOME = filesDir,可写且跨版本升级保留，见下一行);
@@ -5219,6 +5234,7 @@ public class MainActivity extends Activity {
         if (consolePage == PAGE_SESSION_ADMIN) { renderConsoleSessionAdmin(); return; }   // v1.19.4:会话管理（删除）
         if (consolePage == PAGE_SESSION_TRASH) { renderConsoleSessionTrash(); return; }   // v1.19.4:回收站
         if (consolePage == PAGE_BROWSER) { renderConsoleBrowser(); return; }   // v1.19.6 · 阶段 C:AI 浏览器
+        if (consolePage == PAGE_OVERLAY) { renderConsoleOverlay(); return; }   // issue #54:悬浮球手势动作
         if (consolePage >= 5) {                       // v1.17.8:layout.pages 的额外页
             ConsoleTheme ct = conTheme;
             int idx = consolePage - 4;
@@ -5366,6 +5382,9 @@ public class MainActivity extends Activity {
         items.put("browser", cNavRow(t("card.browser", "AI 浏览器"),
                 t("desc.browser", "看 AI 正在哪一页 · 同屏查看（画面可直接操作，拖顶部小条搬窗）"),
                 conBrowserSummary(), PAGE_BROWSER));
+        // issue #54:悬浮球单击 / 长按 / 双击的动作配置（默认单击=面板，长按/双击=无动作）
+        items.put("overlay", cNavRow("悬浮球", "单击 / 长按 / 双击 动作可配置",
+                overlaySummary(), PAGE_OVERLAY));
         items.put("perm", cNavRow(t("card.perm", "授予权限"), t("desc.perm", "存储 · 通知 · 悬浮窗 · 电池 · root · Shizuku · 无障碍"),
                 conPermSummary(), 1));
         items.put("plugins", cNavRow(t("card.plugins", "插件"), t("desc.plugins", "关掉用不到的，省上下文"), conPlugSummary(), 2));
@@ -5426,7 +5445,7 @@ public class MainActivity extends Activity {
     /** v1.19.7:新版主控台里「分组标题 → 它管着哪些行」（整组被隐藏时标题一并收掉）。 */
     private static final String[][] SIMPLE_GROUPS = {
         {"group.sessions", "sessionadmin", "sessionheal"},
-        {"group.system", "env", "browser", "perm", "plugins", "log", "theme"},
+        {"group.system", "env", "browser", "overlay", "perm", "plugins", "log", "theme"},
         {"group.diagnose", "selfcheck"},
     };
 
@@ -5932,6 +5951,9 @@ public class MainActivity extends Activity {
         slp.leftMargin = dp(8);
         enActs.addView(conEnStop, slp);
         box.addView(enActs, cTop(cGap(12)));
+        // issue #54：classic（layout.style=classic）/ 自定义 layout.pages 没有精简骨架的「系统」分组，
+        // 把入口挂在运行环境卡片里，两套界面都能进（不需要新增卡片 id、不动主题规范）。
+        box.addView(cNavRow("悬浮球", "单击 / 长按 / 双击 动作可配置", overlaySummary(), PAGE_OVERLAY), cTop(cGap(10)));
         return box;
     }
 
@@ -9138,6 +9160,151 @@ public class MainActivity extends Activity {
         return box;
     }
 
+    // ==================== issue #54：悬浮球手势动作配置（PAGE_OVERLAY） ====================
+    //
+    // 需求：桌面小鲸鱼的单击 / 长按 / 双击各执行什么动作可配置；
+    // 动作与绑定应用存 SharedPreferences（文件名 dsh_prefs，见 OverlayService 里的键定义），
+    // 悬浮窗每次手势都重新读 prefs，所以这里保存完立即生效，不需要重启服务。
+    // 拖动 / 拖到底部隐藏是既有手势，本页不动它。
+
+    /** 主控台「悬浮球」那一行的右列摘要（太长会挤标题，只显示单击动作）。 */
+    private String overlaySummary() {
+        return "单击 " + OverlayService.actionLabel(OverlayService.overlayAction(this, "tap"));
+    }
+
+    /** 手势的中文名（页面行标题 / 弹窗标题用）。 */
+    private String overlayGestureName(String gesture) {
+        if ("long".equals(gesture)) return "长按";
+        if ("double".equals(gesture)) return "双击";
+        return "单击";
+    }
+
+    /** 动作的一句话说明（选择框每行的副标题）。 */
+    private String overlayActionDesc(String type) {
+        if (OverlayService.ACTION_PANEL.equals(type)) return "展开 / 收起状态面板（默认）";
+        if (OverlayService.ACTION_OPEN_APP.equals(type)) return "打开指定应用";
+        if (OverlayService.ACTION_VSCREEN_CREATE.equals(type)) return "创建虚拟屏并启动指定应用（可不选应用）";
+        if (OverlayService.ACTION_VSCREEN_CLOSE.equals(type)) return "销毁当前虚拟屏";
+        if (OverlayService.ACTION_COLLAPSE.equals(type)) return "收起悬浮球（可从通知栏「显示小鲸鱼」找回）";
+        return "什么都不做";
+    }
+
+    /** 包名 → 应用名（查不到就显示包名，不让界面空着）。 */
+    private String overlayAppLabel(String pkg) {
+        try {
+            PackageManager pm = getPackageManager();
+            CharSequence lab = pm.getApplicationInfo(pkg, 0).loadLabel(pm);
+            if (lab != null && lab.length() > 0) return lab.toString();
+        } catch (Throwable ignored) {}
+        return pkg;
+    }
+
+    /** 悬浮球设置页：三行手势，每行显示当前动作 + 可点开重选。 */
+    private void renderConsoleOverlay() {
+        LinearLayout col = consoleBody;
+        col.addView(conBackRow("悬浮球"));
+        col.addView(cNote("桌面上的小鲸鱼：单击 / 长按 / 双击 各执行什么动作，都在这里配置；"
+                + "拖动、拖到底部隐藏保持不变。"),
+                cTop(cGap(8)));
+        col.addView(cGrpTitle("手势动作"), cTop(cGap(16)));
+        LinearLayout box = cCardBox();
+        box.addView(overlayActionRow("tap", "单击", "点一下小鲸鱼"));
+        box.addView(cCardSep());
+        box.addView(overlayActionRow("long", "长按", "按住约 0.6 秒再松手"));
+        box.addView(cCardSep());
+        box.addView(overlayActionRow("double", "双击", "快速连点两下（判定窗口约 0.28 秒）"));
+        col.addView(box, cTop(cGap(8)));
+        // issue #54：收起后的确定找回入口（通知栏动作在 ColorOS 上偶发不显示）
+        LinearLayout findBox = cCardBox();
+        findBox.addView(cCardRow("恢复显示悬浮球",
+                "「收起悬浮球」后点这里找回；通知栏动作在 ColorOS 上可能不显示", "", false,
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { OverlayService.showBallNow(); }
+                }));
+        col.addView(findBox, cTop(cGap(10)));
+        col.addView(cNote("动作保存后立即生效。「收起悬浮球」可从通知栏「显示小鲸鱼」找回；"
+                + "「创建虚拟屏」成功后会顺带打开预览窗。"),
+                cTop(cGap(10)));
+    }
+
+    /** 页面里的一行手势：标题 + 说明 + 当前动作（右侧）+ 点开选择框。 */
+    private View overlayActionRow(final String gesture, String title, String sub) {
+        final String type = OverlayService.overlayAction(this, gesture);
+        String pkg = OverlayService.overlayActionPkg(this, gesture);
+        String right = OverlayService.actionLabel(type);
+        if (OverlayService.actionNeedsApp(type)) {
+            right += " · " + (pkg.length() == 0 ? "未选应用" : overlayAppLabel(pkg));
+        }
+        return cCardRow(title, sub, right, true, new View.OnClickListener() {
+            @Override public void onClick(View v) { conOverlayPickAction(gesture); }
+        });
+    }
+
+    /** 动作选择框：6 个动作，选完立即保存并刷新页面。 */
+    private void conOverlayPickAction(final String gesture) {
+        final String[] types = OverlayService.actionTypes();
+        final String now = OverlayService.overlayAction(this, gesture);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        for (int i = 0; i < types.length; i++) {
+            final String type = types[i];
+            if (i > 0) list.addView(cCardSep());
+            list.addView(cCardRow(OverlayService.actionLabel(type), overlayActionDesc(type),
+                    type.equals(now) ? "当前" : "", false,
+                    new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            closeDialogOverlay();
+                            if (OverlayService.actionNeedsApp(type)) {
+                                conOverlayPickApp(gesture, type);   // 继续选应用
+                            } else {
+                                // pkg 传 null = 保留原来的应用选择（切回「打开应用」时不用重选）
+                                OverlayService.saveOverlayAction(MainActivity.this, gesture, type, null);
+                                renderConsole();
+                            }
+                        }
+                    }));
+        }
+        conDialogView(overlayGestureName(gesture) + " · 选择动作", list, null, null, "取消");
+    }
+
+    /**
+     * 应用选择框：queryIntentActivities(MAIN/LAUNCHER)，按 label 排序，显示应用名 + 包名。
+     * vscreen_create 额外给一行「不选应用（只建屏）」；conDialogView 内部已包 ScrollView，
+     * 直接往 content 里加多行即可滚动。选完立即保存并刷新页面。
+     */
+    private void conOverlayPickApp(final String gesture, final String type) {
+        final List<String[]> apps = OverlayService.launchableApps(this);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        if (OverlayService.ACTION_VSCREEN_CREATE.equals(type)) {
+            list.addView(cCardRow("不选应用（只建屏）",
+                    "只创建虚拟屏并显示预览，不启动任何应用", "", false,
+                    new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            OverlayService.saveOverlayAction(MainActivity.this, gesture, type, "");
+                            closeDialogOverlay();
+                            renderConsole();
+                        }
+                    }));
+        }
+        for (int i = 0; i < apps.size(); i++) {
+            final String[] app = apps.get(i);
+            if (list.getChildCount() > 0) list.addView(cCardSep());
+            list.addView(cCardRow(app[0], app[1], "", false, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    OverlayService.saveOverlayAction(MainActivity.this, gesture, type, app[1]);
+                    closeDialogOverlay();
+                    renderConsole();
+                }
+            }));
+        }
+        if (list.getChildCount() == 0) {
+            list.addView(cCardRow("没有读取到可启动的应用",
+                    "包管理器没有返回任何带启动图标的 Activity", "", false, null));
+        }
+        conDialogView("选择应用（" + apps.size() + "）", list, null, null, "取消");
+    }
+
     // ---------- 日志页 ----------
 
     // ==================== 自修复：自检页 + 自愈账本（v1.19.x） ====================
@@ -9221,6 +9388,11 @@ public class MainActivity extends Activity {
      * 用负数哨兵的理由同 PAGE_SELFCHECK:自定义页从 5 起编号，内置页不得占用。
      */
     private static final int PAGE_BROWSER = -104;
+    /**
+     * issue #54：悬浮球手势动作配置页（单击 / 长按 / 双击）。
+     * 仍是负页号哨兵 -- 与自定义页（从 5 起）及以后新增的内置页都不冲突。
+     */
+    private static final int PAGE_OVERLAY = -105;
     /** 会话列表（null = 还没加载过）。 */
     private SessionAdmin.ListResult conAdminList;
     /** 回收站列表。 */
@@ -9739,7 +9911,7 @@ public class MainActivity extends Activity {
         load.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View x) { conAdminLoad(); } });
         acts.addView(load, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         int trashN = conAdminTrash == null ? 0 : conAdminTrash.count;
-        Button trash = cButton(t("card.sessiontrash", "回收站") + "(" + trashN + ")", false);
+        Button trash = cButton(t("card.sessiontrash", "回收站") + "（" + trashN + "）", false);
         trash.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View x) { consolePage = PAGE_SESSION_TRASH; renderConsole(); }
         });

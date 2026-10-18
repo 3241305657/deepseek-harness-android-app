@@ -248,7 +248,7 @@ function inspectSession(file, attRoot) {
 	};
 }
 
-/** 递归找出所有 session.jsonl.zstd。 */
+/** 递归找出所有会话日志（session.jsonl.zstd / 0.2.1 起的 session.v4.jsonl.zstd）。 */
 function findSessions(dir) {
 	const out = [];
 	const walk = (d, depth) => {
@@ -262,7 +262,7 @@ function findSessions(dir) {
 		for (const e of entries) {
 			const p = path.join(d, e.name);
 			if (e.isDirectory()) walk(p, depth + 1);
-			else if (e.name === 'session.jsonl.zstd') out.push(p);
+			else if (/^session.*\.jsonl\.zstd$/.test(e.name)) out.push(p);
 		}
 	};
 	walk(dir, 0);

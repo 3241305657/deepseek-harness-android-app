@@ -228,6 +228,13 @@ function privCmd(command, timeoutMs) {
   });
 }
 
+/** shell 单引号字面量（中文/空格/标点安全；v1.20.1 通知校验用）。 */
+function shq(s) {
+  return "'" + String(s == null ? "" : s).replace(/'/g, "'\\''") + "'";
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function apply(ctx) {
   const approval = () => ctx.get("approval");
   const available = privilegedAvailable();
@@ -422,12 +429,18 @@ function apply(ctx) {
         additionalProperties: false,
         properties: {
           ok: { type: "boolean", required: true },
-          error: { type: "string" }
+          error: { type: "string" },
+          posted: { type: "boolean" },
+          visible: { type: "boolean" },
+          evidence: { type: "string" }
         }
       },
       render: (_args, value) => [{
         type: "text",
-        text: value.ok ? "通知已发送 ✅" : "通知发送失败：" + (value.error || "未知错误")
+        text: value.ok
+          ? "通知已发送 ✅" + (typeof value.visible === "boolean"
+              ? "（通知栏可见：" + (value.visible ? "是" : "**否**") + "）" : "")
+          : "通知发送失败：" + (value.error || "未知错误")
       }]
     },
     async execute(args) {
@@ -460,30 +473,50 @@ function apply(ctx) {
           req.write(body);
           req.end();
         });
-        return result;
+        if (!result || result.ok !== true) return { ...result, posted: false };
+        // v1.20.1（AI 建议③）：发完立刻用特权 shell 校验标题/正文是否真的在通知栏里，
+        // 别让"App 说发送成功、系统其实静默拦截"变成假成功（标题/正文在 dumpsys 里是两行）。
+        await sleep(700);
+        const title = String(args.title || "");
+        const text = String(args.text || "");
+        const vt = await privCmd("dumpsys notification --noredact 2>/dev/null | grep -F " + shq(title) + " | head -2", 15000);
+        const vx = await privCmd("dumpsys notification --noredact 2>/dev/null | grep -F " + shq(text) + " | head -2", 15000);
+        const lines = [vt.stdout, vx.stdout].map((s) => String(s || "").trim()).filter(Boolean);
+        const visible = lines.length >= 2;
+        return {
+          ok: true,
+          posted: true,
+          visible,
+          evidence: lines.join(" | ").slice(0, 500)
+        };
       } catch (e) {
-        return { ok: false, error: String(e && e.message || e) };
+        return { ok: false, posted: false, error: String(e && e.message || e) };
       }
     }
   }));
 
-  // 4) 本地设置（**不依赖特权**：只需 App 的「修改系统设置」WRITE_SETTINGS 权限，改 Settings.System 各项）
+  // 4) 本地设置（**不依赖特权写入**：走 App 的 WRITE_SETTINGS；读值走特权 shell）
   ctx.tools.register(defineTool({
     name: "android_setting_app",
     description:
-      "通过 App 自身的 WRITE_SETTINGS 权限修改系统设置（Settings.System 命名空间）。**不需要 Shizuku/root**，但需要用户在权限引导页或系统设置里授予「修改系统设置」权限。" +
+      "读写 App 自身的 Settings.System 设置。**写入不需要 Shizuku/root**（只需「修改系统设置」WRITE_SETTINGS 权限）；" +
+      "读取走特权 shell 的 settings get（需要 Shizuku/root 任一）。" +
       "常用 key：screen_brightness（亮度 0-255）、screen_brightness_mode（0=手动 1=自动）、screen_off_timeout（屏幕超时毫秒，如 60000）、" +
       "accelerometer_rotation（自动旋转 0/1）、font_scale（字体大小，如 1.0/1.3）、volume_music/volume_ring/volume_alarm/volume_notification（音量 0-15）、" +
       "sound_effects_enabled（触摸音 0/1）、haptic_feedback_enabled（震动反馈 0/1）、notification_light_pulse（通知灯 0/1）、ringtone（铃声 Uri）。" +
-      "改全局设置（Global/Secure 命名空间）请用 shizuku_shell 的 settings 命令（需要特权）。",
+      "put 会带回 oldValue/newValue（一次调用就能确认翻转与还原）；改 Global/Secure 命名空间请用 shizuku_shell 的 settings 命令。",
     parameters: {
+      action: {
+        type: "string", enum: ["get", "put"],
+        description: "get=读当前值（走特权 shell）；put=写入（缺省，走 App WRITE_SETTINGS）"
+      },
       key: {
         type: "string", required: true,
         description: "Settings.System 的 key（见工具描述常用清单）"
       },
       value: {
-        type: "string", required: true,
-        description: "要写入的值（数字或字符串）"
+        type: "string",
+        description: "put 时要写入的值（数字或字符串）；action=get 时可省略"
       }
     },
     output: {
@@ -493,6 +526,11 @@ function apply(ctx) {
         properties: {
           ok: { type: "boolean", required: true },
           error: { type: "string" },
+          namespace: { type: "string" },
+          key: { type: "string" },
+          value: { type: "string" },
+          oldValue: { type: "string" },
+          newValue: { type: "string" },
           stream: { type: "string" },
           level: { type: "number" },
           max: { type: "number" }
@@ -501,16 +539,41 @@ function apply(ctx) {
       render: (_args, value) => [{
         type: "text",
         text: value.ok
-          ? (value.stream ? "已设置 " + value.stream + " = " + value.level + "（最大 " + value.max + "）✅" : "系统设置已修改 ✅")
-          : "修改失败：" + (value.error || "未知错误")
+          ? (value.action === "get" || (value.value !== undefined && value.newValue === undefined)
+              ? (value.key || "?") + " = " + (value.value === "" ? "(空)" : value.value)
+              : (value.stream
+                  ? "已设置 " + value.stream + " = " + value.level + "（最大 " + value.max + "）✅"
+                  : "已设置 " + (value.key || "?") + "：" + (value.oldValue ?? "?") + " → " + (value.newValue ?? "?") + " ✅"))
+          : "设置失败：" + (value.error || "未知错误")
       }]
     },
     async execute(args) {
+      const action = String(args.action || "put").toLowerCase();
+      const key = String(args.key || "");
+      if (!key) return { ok: false, error: "缺少 key 参数" };
       try {
+        // 读当前值：特权 shell（输出可能落在 stdout 或 stderr，统一取非空的那个）
+        const readKey = async () => {
+          const r = await privCmd("settings get system " + shq(key), 15000);
+          const v = String(r.stdout || "").trim() || String(r.stderr || "").trim();
+          return { ok: r.ok && v !== "" && v !== "null", value: v, raw: r };
+        };
+        if (action === "get") {
+          const cur = await readKey();
+          return {
+            ok: cur.ok,
+            namespace: "system",
+            key,
+            value: cur.value,
+            ...(cur.ok ? {} : { error: cur.raw.error || ("读不到 " + key) })
+          };
+        }
+        const before = await readKey();
+        const val = String(args.value == null ? "" : args.value);
         const http = await import("node:http");
         const port = Number(process.env.APP_NOTIFY_PORT) || 3081;
-        const body = JSON.stringify({ key: String(args.key || ""), value: String(args.value == null ? "" : args.value) });
-        const result = await new Promise((resolve) => {
+        const body = JSON.stringify({ key, value: val });
+        const posted = await new Promise((resolve) => {
           const req = http.request({
             host: "127.0.0.1", port, path: "/setting", method: "POST",
             headers: {
@@ -532,7 +595,21 @@ function apply(ctx) {
           req.write(body);
           req.end();
         });
-        return result;
+        if (!posted || posted.ok !== true) {
+          return { ...posted, ok: false, namespace: "system", key, oldValue: before.value };
+        }
+        await sleep(250);
+        const after = await readKey();
+        // 音量类由 App 返回 stream/level/max；普通 key 由回读得到 newValue
+        return {
+          ...posted,
+          ok: true,
+          namespace: "system",
+          key,
+          oldValue: before.value,
+          newValue: after.value,
+          ...(typeof posted.level === "number" ? { newValue: String(posted.level) } : {})
+        };
       } catch (e) {
         return { ok: false, error: String(e && e.message || e) };
       }

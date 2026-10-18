@@ -86,6 +86,26 @@ function dirSize(dir) {
   return n;
 }
 
+/**
+ * 找一条会话的日志文件。
+ * 0.2.1-rc.2 起内核把文件名从 `session.jsonl.zstd` 改成了 `session.v4.jsonl.zstd`
+ * （见 dsh-session-persistence-jsonl），旧名仍兼容。这里按「已知名 → 通配」找，
+ * 以后内核再改成 v5 也不会又把会话列表变成 0 条。
+ */
+const SESSION_FILE_NAMES = ['session.v4.jsonl.zstd', 'session.jsonl.zstd'];
+function sessionFileIn(dir) {
+  for (const n of SESSION_FILE_NAMES) {
+    const p = path.join(dir, n);
+    if (fs.existsSync(p)) return p;
+  }
+  try {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.isFile() && /^session.*\.jsonl\.zstd$/.test(e.name)) return path.join(dir, e.name);
+    }
+  } catch {}
+  return null;
+}
+
 /** 扫 sessions/ 下的全部会话条目。 */
 function listSessions(sessionsDir) {
   const out = [];
@@ -99,8 +119,8 @@ function listSessions(sessionsDir) {
     for (const idDir of ids) {
       if (!idDir.isDirectory()) continue;
       const dir = path.join(slugDir, idDir.name);
-      const file = path.join(dir, 'session.jsonl.zstd');
-      if (!fs.existsSync(file)) continue;
+      const file = sessionFileIn(dir);
+      if (!file) continue;
       let bytes = 0, mtime = 0, title = '', lines = 0, frames = 0, bad = 0;
       try {
         const st = fs.statSync(file);
@@ -176,9 +196,9 @@ function listTrash(sessionsDir) {
     const dir = path.join(root, e.name);
     let origin = null;
     try { origin = JSON.parse(fs.readFileSync(path.join(dir, '.origin'), 'utf8')); } catch {}
-    const file = path.join(dir, 'session.jsonl.zstd');
+    const file = sessionFileIn(dir);
     let title = '', bytes = 0, lines = 0, mtime = 0;
-    if (fs.existsSync(file)) {
+    if (file) {
       try {
         const st = fs.statSync(file);
         bytes = st.size;

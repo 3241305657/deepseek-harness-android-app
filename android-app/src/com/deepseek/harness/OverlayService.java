@@ -8,6 +8,8 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -32,7 +34,11 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.List;
 
 import org.json.JSONObject;
 
@@ -81,6 +87,23 @@ public class OverlayService extends Service {
     /** AI "已完成"提示在状态切换后保留的时长（毫秒）。 */
     private static final long FINISHED_TTL_MS = 60000L;
 
+    // ==================== issue #54：悬浮球手势动作（可配置） ====================
+    // 动作存 SharedPreferences（文件名 dsh_prefs，键 overlayTap/overlayLong/overlayDouble + Pkg）：
+    // 默认单击=展开/收起面板（老行为），长按/双击=无动作；每次手势都重新读，改完立即生效。
+    public static final String ACTION_PANEL = "panel";
+    public static final String ACTION_OPEN_APP = "open_app";
+    public static final String ACTION_VSCREEN_CREATE = "vscreen_create";
+    public static final String ACTION_VSCREEN_CLOSE = "vscreen_close";
+    public static final String ACTION_COLLAPSE = "collapse";
+    public static final String ACTION_NONE = "none";
+    /** 可选动作的展示顺序（控制台「悬浮球」页的动作选择框按这个顺序排）。 */
+    private static final String[] ACTION_TYPES = {
+            ACTION_PANEL, ACTION_OPEN_APP, ACTION_VSCREEN_CREATE,
+            ACTION_VSCREEN_CLOSE, ACTION_COLLAPSE, ACTION_NONE};
+    /** 双击判定窗口（两次抬起之间的最大间隔）与长按阈值（按下到抬起的最短时长）。 */
+    private static final long DOUBLE_TAP_MS = 280L;
+    private static final long LONG_PRESS_MS = 600L;
+
     /** 当前运行的 OverlayService 实例（供 MainActivity 前后台联动控制视图可见性）。 */
     private static OverlayService instance = null;
 
@@ -127,6 +150,82 @@ public class OverlayService extends Service {
     public static int enginePort(Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences(PREFS, MODE_PRIVATE);
         return sp.getInt(KEY_PORT, defaultEnginePort(ctx));
+    }
+
+    // ---------- issue #54：手势动作的 prefs 读写（控制台与悬浮窗共用同一套口径） ----------
+
+    /** 手势 → prefs 键（非法/未知手势按单击处理）。 */
+    private static String gesturePrefKey(String gesture) {
+        if ("long".equals(gesture)) return "overlayLong";
+        if ("double".equals(gesture)) return "overlayDouble";
+        return "overlayTap";
+    }
+
+    /** 六个可选动作（拷贝，调用方随便改不影响内置顺序）。 */
+    public static String[] actionTypes() {
+        return ACTION_TYPES.clone();
+    }
+
+    /** 动作的中文名（控制台「悬浮球」页与选择框用）。 */
+    public static String actionLabel(String type) {
+        if (ACTION_PANEL.equals(type)) return "状态面板";
+        if (ACTION_OPEN_APP.equals(type)) return "打开应用";
+        if (ACTION_VSCREEN_CREATE.equals(type)) return "创建虚拟屏";
+        if (ACTION_VSCREEN_CLOSE.equals(type)) return "销毁虚拟屏";
+        if (ACTION_COLLAPSE.equals(type)) return "收起悬浮球";
+        if (ACTION_NONE.equals(type)) return "无动作";
+        return "无动作";
+    }
+
+    /** 该动作是否需要再选一个应用（open_app 必选 / vscreen_create 可空）。 */
+    public static boolean actionNeedsApp(String type) {
+        return ACTION_OPEN_APP.equals(type) || ACTION_VSCREEN_CREATE.equals(type);
+    }
+
+    /** 读某个手势配置的动作；没配过时单击=panel、长按/双击=none。 */
+    public static String overlayAction(Context ctx, String gesture) {
+        String def = "tap".equals(gesture) ? ACTION_PANEL : ACTION_NONE;
+        try {
+            String v = ctx.getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .getString(gesturePrefKey(gesture), def);
+            return normalizeAction(v, def);
+        } catch (Throwable t) {
+            return def;
+        }
+    }
+
+    /** 读某个手势绑定的应用包名（没配过 = 空串）。 */
+    public static String overlayActionPkg(Context ctx, String gesture) {
+        try {
+            String v = ctx.getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .getString(gesturePrefKey(gesture) + "Pkg", "");
+            return v == null ? "" : v;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
+     * 保存某个手势的动作。
+     * @param pkg 非 null 时才写包名键（null = 保留原来的应用选择，切回「打开应用」时不用重选）。
+     */
+    public static void saveOverlayAction(Context ctx, String gesture, String type, String pkg) {
+        try {
+            SharedPreferences.Editor e = ctx.getSharedPreferences(PREFS, MODE_PRIVATE).edit();
+            e.putString(gesturePrefKey(gesture), normalizeAction(type, ACTION_NONE));
+            if (pkg != null) e.putString(gesturePrefKey(gesture) + "Pkg", pkg.trim());
+            e.apply();
+        } catch (Throwable ignored) {}
+    }
+
+    /** 只认 6 个合法值；配置文件里被手改成别的值 → 回落默认，避免悬浮窗行为不确定。 */
+    private static String normalizeAction(String v, String def) {
+        if (v != null) {
+            for (int i = 0; i < ACTION_TYPES.length; i++) {
+                if (ACTION_TYPES[i].equals(v)) return v;
+            }
+        }
+        return def;
     }
 
     private final Runnable probeRunnable = new Runnable() {
@@ -337,9 +436,29 @@ public class OverlayService extends Service {
         rootView.addView(panelView);
         setPanelVisible(false, false);
 
-        // ===== 拖动 + 点击 + 拖底隐藏 =====
+        // ===== 拖动 + 单击 / 长按 / 双击（issue #54：动作可配置）+ 拖底隐藏 =====
         rootView.setOnTouchListener(new View.OnTouchListener() {
+            /** 本次按下时间（长按判定）与上一次「短按抬起」时间（双击判定）。 */
             private long downAt = 0;
+            private long lastTapAt = 0L;
+            /**
+             * 单击延迟执行：先等一个双击窗口，确认不是双击后再跑单击动作。
+             * 若立即执行单击，「单击=打开应用」这类动作会先跳出应用，双击永远轮不到。
+             */
+            private final Runnable tapRunnable = new Runnable() {
+                @Override public void run() {
+                    if (lastTapAt == 0L) return;
+                    lastTapAt = 0L;
+                    runGestureAction("tap");
+                }
+            };
+
+            /** 放弃还没执行的单击（双击/长按/拖动都会走到这里）。 */
+            private void cancelPendingTap() {
+                lastTapAt = 0L;
+                handler.removeCallbacks(tapRunnable);
+            }
+
             @Override public boolean onTouch(View v, MotionEvent ev) {
                 switch (ev.getAction()) {
                     case MotionEvent.ACTION_DOWN:
@@ -347,10 +466,15 @@ public class OverlayService extends Service {
                         touchX = ev.getRawX(); touchY = ev.getRawY();
                         startX = lp.x; startY = lp.y;
                         dragging = false;
+                        // 手指再次按下：上一次的单击先挂起不执行 —— 这一下可能是双击的第二下，
+                        // 也可能变成拖动/长按；等抬起时再定（见 ACTION_UP）。
+                        if (lastTapAt != 0L) handler.removeCallbacks(tapRunnable);
                         return true;
                     case MotionEvent.ACTION_MOVE:
-                        if (Math.abs(ev.getRawX() - touchX) > dp(8) || Math.abs(ev.getRawY() - touchY) > dp(8)) {
+                        if (!dragging && (Math.abs(ev.getRawX() - touchX) > dp(8)
+                                || Math.abs(ev.getRawY() - touchY) > dp(8))) {
                             dragging = true;
+                            cancelPendingTap();   // 变成拖动 → 上一次的单击作废
                         }
                         if (dragging) {
                             lp.x = (int) (startX + (ev.getRawX() - touchX));
@@ -360,24 +484,138 @@ public class OverlayService extends Service {
                         }
                         return true;
                     case MotionEvent.ACTION_UP:
+                        long upAt = System.currentTimeMillis();
+                        long held = upAt - downAt;
                         if (dragging && dismissHint) {
                             hideByDragToBottom();
                         } else if (dragging) {
                             snapToEdge();      // 拖完自动吸到最近的左右边缘（静置态=半藏）
                             if (panelVisible) setPanelVisible(true, false);
-                        } else if (System.currentTimeMillis() - downAt < 400) {
-                            setPanelVisible(!panelVisible, true);
+                        } else if (held >= LONG_PRESS_MS) {
+                            cancelPendingTap();
+                            runGestureAction("long");
+                        } else if (lastTapAt != 0L && upAt - lastTapAt <= DOUBLE_TAP_MS) {
+                            cancelPendingTap();
+                            runGestureAction("double");
+                        } else if ("none".equals(overlayAction(OverlayService.this, "double"))) {
+                            // 双击没配动作 → 不必等双击窗口，单击立即执行（默认单击=面板，手感不变）
+                            runGestureAction("tap");
+                        } else {
+                            lastTapAt = upAt;
+                            handler.postDelayed(tapRunnable, DOUBLE_TAP_MS + 40);
                         }
                         setDismissHintInternal(false);
                         return true;
+                    case MotionEvent.ACTION_CANCEL:
+                        cancelPendingTap();
+                        setDismissHintInternal(false);
+                        return true;
                     case MotionEvent.ACTION_OUTSIDE:
-                        // 点击悬浮窗外区域：收回面板（回到半藏态）
+                        // 点击悬浮窗外区域：收回面板（回到半藏态），并作废还没执行的单击
+                        cancelPendingTap();
                         if (panelVisible) setPanelVisible(false, true);
                         return true;
                 }
                 return false;
             }
         });
+    }
+
+    /** 手势 → 读 prefs → 执行动作（每次手势都读，控制台改完立即生效）。 */
+    private void runGestureAction(String gesture) {
+        String type = overlayAction(this, gesture);
+        String pkg = overlayActionPkg(this, gesture);
+        runOverlayAction(type, pkg);
+    }
+
+    /** 执行一个悬浮球动作；任何异常都不许把悬浮窗主流程带崩。 */
+    private void runOverlayAction(String type, String pkg) {
+        try {
+            if (type == null || ACTION_NONE.equals(type)) return;
+            if (ACTION_PANEL.equals(type)) {
+                setPanelVisible(!panelVisible, true);
+                return;
+            }
+            if (ACTION_COLLAPSE.equals(type)) {
+                // 复用拖到底部松手的隐藏逻辑（私有方法，类内直接调）
+                hideByDragToBottom();
+                return;
+            }
+            if (ACTION_VSCREEN_CLOSE.equals(type)) {
+                VsreenBridgeService.destroyVscreenFromWhale();
+                return;
+            }
+            if (ACTION_OPEN_APP.equals(type)) {
+                openAppFromOverlay(pkg);
+                return;
+            }
+            if (ACTION_VSCREEN_CREATE.equals(type)) {
+                VsreenBridgeService.createVscreenForPackage(pkg == null ? "" : pkg.trim());
+            }
+        } catch (Throwable t) {
+            toastOverlay("动作执行失败：" + t.getMessage());
+        }
+    }
+
+    /** 「打开应用」动作：没配应用 / 应用已卸载都明确提示，不静默。 */
+    private void openAppFromOverlay(String pkg) {
+        String p = pkg == null ? "" : pkg.trim();
+        if (p.length() == 0) {
+            toastOverlay("未配置应用");
+            return;
+        }
+        try {
+            Intent i = getPackageManager().getLaunchIntentForPackage(p);
+            if (i == null) {
+                toastOverlay("未找到应用");
+                return;
+            }
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Throwable t) {
+            toastOverlay("未找到应用");
+        }
+    }
+
+    private void toastOverlay(String msg) {
+        try {
+            android.widget.Toast.makeText(getApplicationContext(), msg,
+                    android.widget.Toast.LENGTH_SHORT).show();
+        } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 可启动应用列表：每项 {应用名, 包名}，按应用名排序、同一包名只留一条。
+     * 控制台「悬浮球」页选应用用；包管理器查询失败返回空列表（页面会如实提示）。
+     */
+    public static List<String[]> launchableApps(Context ctx) {
+        List<String[]> out = new ArrayList<String[]>();
+        if (ctx == null) return out;
+        try {
+            PackageManager pm = ctx.getPackageManager();
+            Intent main = new Intent(Intent.ACTION_MAIN);
+            main.addCategory(Intent.CATEGORY_LAUNCHER);
+            List<ResolveInfo> infos = pm.queryIntentActivities(main, 0);
+            if (infos == null) return out;
+            HashSet<String> seen = new HashSet<String>();
+            for (int i = 0; i < infos.size(); i++) {
+                ResolveInfo ri = infos.get(i);
+                if (ri == null || ri.activityInfo == null) continue;
+                String pkg = ri.activityInfo.packageName;
+                if (pkg == null || pkg.length() == 0 || !seen.add(pkg)) continue;
+                CharSequence lab = ri.loadLabel(pm);
+                String label = lab == null ? "" : lab.toString().trim();
+                if (label.length() == 0) label = pkg;
+                out.add(new String[]{label, pkg});
+            }
+            Collections.sort(out, new Comparator<String[]>() {
+                @Override public int compare(String[] a, String[] b) {
+                    int c = a[0].compareToIgnoreCase(b[0]);
+                    return c != 0 ? c : a[0].compareTo(b[0]);
+                }
+            });
+        } catch (Throwable ignored) {}
+        return out;
     }
 
     /** 面板里的小胶囊按钮（v1.13.12 重做：小、轻、不抢眼）。 */
@@ -428,6 +666,20 @@ public class OverlayService extends Service {
         if (s != null) s.applyVscreenPin(pin);
     }
 
+    /**
+     * issue #54：从控制台把「收起」掉的悬浮球显示回来。
+     * 收起（双击动作 / 拖底隐藏）只置 userHidden；ColorOS 的通知栏动作偶尔不显示，
+     * 所以控制台里留一个确定可用的找回入口。
+     */
+    public static void showBallNow() {
+        OverlayService s = instance;
+        if (s == null) return;
+        s.userHidden = false;
+        s.foregroundWantsHidden = false;
+        s.applyVisibleNow();
+        s.setPanelVisible(true, true);
+    }
+
     private void applyVscreenPin(boolean pin) {
         try {
             vscreenPinned = pin;
@@ -451,45 +703,77 @@ public class OverlayService extends Service {
         } catch (Throwable ignored) {}
     }
 
-    // ==================== 自定义悬浮窗图标（issue #47） ====================
-    // 约定：外部应用根目录（/sdcard/<DeepSeekHarness|DeepSeekHarnessLite|DeepSeekHarnessCompat>/）
-    //   下存在 overlay-icon.png 时，悬浮窗图标用它替换内置小鲸鱼。
-    //  · 只认这一个固定路径（不接任意 URI —— 悬浮窗是常驻系统级窗口，图标来源必须收敛）；
-    //  · PNG/WebP 均可（BitmapFactory 原生支持）；>2048px 先降采样，避免大图 OOM / 拉帧卡顿；
-    //  · 文件缺失 / 解码失败一律静默回落内置鲸鱼 —— 悬浮窗的稳定性比图标好看重要；
-    //  · 文件被替换 / 删除后，下一次可见性刷新时自动跟随（按 mtime 判断；解码放后台线程）。
-    private volatile long overlayIconMtime = -2L;   // 已加载图标的文件 mtime；-2=还没查过，-1=当前是内置图标
+    // ==================== 自定义悬浮窗图标（issue #47 / v1.19.8 纳入主题体系） ====================
+    // 图片来源（按优先级）：
+    //   ① 控制台主题里的 appearance.overlayIcon（v1.19.8 起）—— 图片随主题包一起导入/导出，
+    //      与控制台其它外观同一套机制（相对 console/ 的文件名，或 /sdcard/… 绝对路径）；
+    //   ② 遗留约定路径 /sdcard/<DeepSeekHarness|…Lite|…Compat>/overlay-icon.png（issue #47 老用法，保持兼容）；
+    //   ③ 都没有 → 内置小鲸鱼。
+    //  · PNG/WebP/JPG 均可（BitmapFactory 原生支持）；>2048px 先降采样，避免大图 OOM / 拉帧卡顿；
+    //  · 文件缺失 / 解码失败 / 主题配置坏掉 一律静默回落内置鲸鱼 —— 悬浮窗的稳定性比图标好看重要；
+    //  · 换图 / 删图 / 换主题后，下一次可见性刷新时自动跟随（按 mtime 判断；解码放后台线程）。
+    private volatile String overlayIconKey = null;   // 已加载图标的键 = "<路径>@<mtime>"；null=当前是内置图标
+    private volatile long overlayIconThemeMtime = -3L;   // 上次读取时 console.json 的 mtime（换主题要重判）
 
     private File overlayIconFile() {
         try {
             String p = getPackageName();
             String root = p.contains("beta") ? "DeepSeekHarnessLite"
                     : p.contains("compat") ? "DeepSeekHarnessCompat" : "DeepSeekHarness";
-            return new File(android.os.Environment.getExternalStorageDirectory(), root + "/overlay-icon.png");
+            File extRoot = new File(android.os.Environment.getExternalStorageDirectory(), root);
+            File cfg = new File(new File(extRoot, "console"), "console.json");
+            File legacy = new File(extRoot, "overlay-icon.png");
+            // ⚠ 主题里指向的图片不存在时，ConsoleTheme.overlayIconFile 会自动落回 legacy（见其注释）
+            return ConsoleTheme.overlayIconFile(cfg, legacy);
         } catch (Throwable t) {
             return null;
         }
     }
 
-    /** 按 mtime 决定要不要换图标；需要解码时放后台线程，失败一律回落内置鲸鱼。 */
+    /** 控制台主题文件（换主题 → 图标可能跟着换，所以要盯它的 mtime）。 */
+    private File overlayIconConfigFile() {
+        try {
+            String p = getPackageName();
+            String root = p.contains("beta") ? "DeepSeekHarnessLite"
+                    : p.contains("compat") ? "DeepSeekHarnessCompat" : "DeepSeekHarness";
+            return new File(new File(new File(android.os.Environment.getExternalStorageDirectory(), root), "console"), "console.json");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * 按 mtime 决定要不要换图标；需要解码时放后台线程，失败一律回落内置鲸鱼。
+     *
+     * ⚠ 缓存键必须是「**最终解析到的文件路径** + mtime」，不能只记 mtime：
+     *   主题图被删后会静默回落到遗留路径的图，两条路径 mtime 可能都没变
+     *   → 只比 mtime 的话会拿着旧图不放（真机实测踩过：删主题图后没回落）。
+     *   主题文件本身的 mtime 也要一起比（换主题 → 图标可能跟着换）。
+     */
     private void refreshOverlayIcon() {
+        final File cfg = overlayIconConfigFile();
+        long cfgMtime = (cfg != null && cfg.isFile()) ? cfg.lastModified() : -1L;
         final File f = overlayIconFile();
-        long mt = (f != null && f.isFile()) ? f.lastModified() : -1L;
-        if (mt == overlayIconMtime) return;      // 没变化
-        if (mt <= 0) {                            // 文件没了 → 回内置鲸鱼
-            overlayIconMtime = -1L;
+        String key = (f != null && f.isFile()) ? (f.getAbsolutePath() + "@" + f.lastModified()) : null;
+        // 诊断（真机排查用）：logcat -s DeepSeekHarness 能看到图标到底取到哪个文件
+        android.util.Log.i("DeepSeekHarness", "overlay icon: cfg=" + (cfg == null ? "-" : cfg.getAbsolutePath() + "@" + cfgMtime)
+                + " file=" + (key == null ? "<none>" : key) + " cached=" + overlayIconKey);
+        if (cfgMtime == overlayIconThemeMtime && String.valueOf(key).equals(String.valueOf(overlayIconKey))) return;
+        overlayIconThemeMtime = cfgMtime;
+        final String expectKey = key;
+        if (key == null) {                        // 没图（主题没指定、约定路径也没有）→ 回内置鲸鱼
+            overlayIconKey = null;
             try { if (iconView != null) iconView.setImageResource(R.drawable.ic_whale_black); } catch (Throwable ignored) {}
             return;
         }
-        overlayIconMtime = mt;
-        final long expectMtime = mt;
+        overlayIconKey = key;
         new Thread(new Runnable() { @Override public void run() {
             final android.graphics.Bitmap bmp = decodeIconBitmap(f);
             handler.post(new Runnable() { @Override public void run() {
                 if (!isRunning || iconView == null) return;
-                if (overlayIconMtime != expectMtime) return;   // 期间又变了，下一次刷新再处理
+                if (!String.valueOf(overlayIconKey).equals(String.valueOf(expectKey))) return;   // 期间又变了，下次刷新再处理
                 if (bmp != null) iconView.setImageBitmap(bmp);
-                else { overlayIconMtime = -1L; iconView.setImageResource(R.drawable.ic_whale_black); }
+                else { overlayIconKey = null; iconView.setImageResource(R.drawable.ic_whale_black); }
             }});
         }}, "overlay-icon").start();
     }

@@ -136,6 +136,19 @@ public class VsreenBridgeService extends Service {
         if (s != null) s.doShowPreviewFromWhale();
     }
 
+    /**
+     * issue #54：悬浮球「创建虚拟屏」动作。
+     *
+     * 与 showPreviewFromWhale() 同一条「确保可用」链路（拉起核心 → 没屏就建屏 → 显示预览窗）；
+     * 建屏成功后再按需把指定应用启动到这块虚拟屏上。全程后台线程，失败如实 toast。
+     *
+     * @param pkg 要启动的应用包名；null / 空串 = 只建屏 + 显示预览（不启动应用）
+     */
+    public static void createVscreenForPackage(String pkg) {
+        VsreenBridgeService s = instance;
+        if (s != null) s.doCreateVscreenForPackage(pkg);
+    }
+
     /** 小鲸鱼面板「销毁屏」按钮：销毁虚拟屏并收掉预览窗（替代旧预览窗上的 ✕）。 */
     public static void destroyVscreenFromWhale() {
         VsreenBridgeService s = instance;
@@ -450,6 +463,79 @@ public class VsreenBridgeService extends Service {
                 } catch (Throwable ignored) {}
             }});
         }}, "vscreen-ensure").start();
+    }
+
+    /**
+     * issue #54 的实现体：确保核心/虚拟屏 →（可选）把应用启动到虚拟屏 → 成功才显示预览窗。
+     *
+     * 复用 ensureVscreenThenShowPreview() 的线程结构与 vscreenEnsureInFlight 防重入：
+     * 这段窗口期内预览轮询不能收窗，否则刚建好的窗会被轮询收掉（issue #36 的"闪一下"）。
+     * 任何一步失败都 toast 原因；启动应用失败不显示预览窗（与"成功才显示"口径一致）。
+     */
+    private void doCreateVscreenForPackage(final String pkg) {
+        if (vscreenEnsureInFlight) return;
+        vscreenEnsureInFlight = true;
+        new Thread(new Runnable() { @Override public void run() {
+            String err = null;
+            String okMsg = null;
+            try {
+                // 用户主动创建 → 清掉「主动关掉过」和「收起到小鲸鱼」两个标记，预览窗才能正常弹出
+                previewDismissedDisplayId = Integer.MIN_VALUE;
+                previewCollapsedToWhale = false;
+                // ① 确保特权核心在跑
+                if (!coreAlive()) {
+                    ensureCoreServer();
+                    if (!coreAlive()) {
+                        err = "虚拟屏服务未就绪：请确认 Shizuku 正在运行且已授权本应用（控制台 → 权限）";
+                    }
+                }
+                boolean created = false;
+                // ② 没有虚拟屏就建一块
+                if (err == null) {
+                    String st = coreGet("/vscreen/status", 3000);
+                    if (jsonInt(st, "displayId", -1) < 0) {
+                        String cr = coreGet("/vscreen/create?w=" + DEFAULT_VSCREEN_W
+                                + "&h=" + DEFAULT_VSCREEN_H, 20000);
+                        if (cr == null) {
+                            err = "建屏失败：虚拟屏服务无响应（可看控制台日志）";
+                        } else if (!cr.contains("\"ok\":true")) {
+                            err = "建屏失败：" + clip(cr, 120);
+                        } else {
+                            created = true;
+                            Log.i(TAG, "issue#54: 悬浮球已建屏 " + DEFAULT_VSCREEN_W + "x" + DEFAULT_VSCREEN_H);
+                        }
+                    }
+                }
+                // ③ 指定了应用就启动到虚拟屏（core 的 /vscreen/launch 参数名就是 pkg，需 URL 编码）
+                if (err == null && pkg != null && pkg.trim().length() > 0) {
+                    String target = pkg.trim();
+                    String lr = coreGet("/vscreen/launch?pkg="
+                            + java.net.URLEncoder.encode(target, "UTF-8"), 15000);
+                    if (lr == null) {
+                        err = "启动应用失败：虚拟屏服务无响应";
+                    } else if (!lr.contains("\"ok\":true")) {
+                        err = "启动应用失败：" + clip(lr, 120);
+                    } else {
+                        okMsg = "虚拟屏已就绪，已启动 " + target;
+                    }
+                } else if (err == null) {
+                    okMsg = created ? "虚拟屏已创建（未指定应用，只显示预览）" : "虚拟屏已就绪";
+                }
+            } catch (Throwable t) {
+                err = "虚拟屏启动异常：" + t.getMessage();
+            } finally {
+                vscreenEnsureInFlight = false;
+            }
+            final String ferr = err;
+            final String fok = okMsg;
+            previewHandler.post(new Runnable() { @Override public void run() {
+                try {
+                    if (ferr != null) { toast(ferr); return; }   // 如实报错，不再静默
+                    if (fok != null) toast(fok);
+                    showPreviewWindow();
+                } catch (Throwable ignored) {}
+            }});
+        }}, "vscreen-create-app").start();
     }
 
     /** 把特权服务端的 JSON 响应截成一小段，供 toast 显示（失败时不要再让人去猜）。 */

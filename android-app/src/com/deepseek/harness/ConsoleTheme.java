@@ -171,6 +171,11 @@ final class ConsoleTheme {
     Integer radius = null;            // null = 没写 → 沿用各控件内置圆角
     boolean mono = false;
     String logo = null;
+    /**
+     * 悬浮窗（小鲸鱼）图标（appearance.overlayIcon）：文件名（相对 console/）或 /sdcard/… 路径。
+     * v1.19.8 起悬浮窗图标纳入主题体系 —— 以前只能往约定路径扔 overlay-icon.png（遗留路径仍兼容）。
+     */
+    String overlayIcon = null;
     Float cardsAlpha = null;          // null = 没写 → 不动底色 alpha
     // ---- layout（第 4 步：内置卡片的显隐·顺序·默认页）----
     java.util.List<String> cardOrder = null;                 // null = 用内置顺序
@@ -217,6 +222,42 @@ final class ConsoleTheme {
     String schemaRaw = null;                                  // 读到的 schema 原值（报错用）
 
     // ==================== 载入 ====================
+
+    /**
+     * 把外观里的一条图片引用解析成真实文件（与 MainActivity.conImageFile 同一套规则，
+     * 供悬浮窗等非控制台组件复用）：
+     *   · 文件名      → {@code <配置所在目录>/<文件名>}（主题包导出时图片与 console.json 同目录）
+     *   · /sdcard/… → 外部存储绝对路径
+     * 解析不出来返回 null（调用方自己回落）。
+     */
+    static File resolveImage(File configFile, String ref) {
+        if (ref == null || ref.length() == 0) return null;
+        try {
+            if (ref.startsWith("/sdcard/")) {
+                return new File(android.os.Environment.getExternalStorageDirectory(), ref.substring("/sdcard/".length()));
+            }
+            File dir = (configFile == null) ? null : configFile.getParentFile();
+            return new File(dir, ref);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * 悬浮窗图标该用哪个文件（v1.19.8 起纳入主题体系）：
+     *   ① 主题里写了 {@code appearance.overlayIcon} → 用它的解析结果（不存在则算没配）；
+     *   ② 否则用**遗留约定路径** {@code /sdcard/<包根目录>/overlay-icon.png}（issue #47 的老用法，保持兼容）。
+     * 两条都没有就返回 null（悬浮窗回落内置小鲸鱼）。
+     */
+    static File overlayIconFile(File configFile, File legacyFile) {
+        ConsoleTheme t = load(configFile);
+        if (!t.fatal && t.overlayIcon != null) {
+            File f = resolveImage(configFile, t.overlayIcon);
+            if (f != null && f.isFile()) return f;
+        }
+        if (legacyFile != null && legacyFile.isFile()) return legacyFile;
+        return null;
+    }
 
     /** 读并解析一份 console.json。<b>任何异常都在内部吃掉</b>，永远返回一个可用对象。 */
     static ConsoleTheme load(File f) {
@@ -416,6 +457,11 @@ final class ConsoleTheme {
         if (lg != null) {
             if (lg instanceof String && IMG_REF_RE.matcher((String) lg).matches()) logo = (String) lg;
             else revert("$.appearance.logo", "应为图片文件名（png/jpg/jpeg/webp）或 /sdcard/… 路径");
+        }
+        Object oi = ap.opt("overlayIcon");
+        if (oi != null) {
+            if (oi instanceof String && IMG_REF_RE.matcher((String) oi).matches()) overlayIcon = (String) oi;
+            else revert("$.appearance.overlayIcon", "应为图片文件名（png/jpg/jpeg/webp）或 /sdcard/… 路径");
         }
         Object st = null;
         if (ap.has("colors") && ap.opt("colors") instanceof JSONObject) {

@@ -92,6 +92,13 @@ public final class BrowserHost {
     private static final class TabState {
         /** 页面代次：任何导航/重载 +1；ref 只在同一代次内保证有效。 */
         long generation = 0;
+        /** v1.20.1：导航代次（只由 onPageStarted 递增）——快照的"页面导航了"判据用它，
+         *  不能用 generation：DOM 变更（MutationObserver）也会让 generation+1，活页面会误报 stale。 */
+        long navGen = 0;
+        /** v1.20.1：上一次看到的"页面变更计数"（window.__dshMut）；-1 = 这个页面还没同步过。 */
+        long mut = -1;
+        /** v1.20.1：上一轮快照/点击时的可见文本行（用于 newText 差分与"纯文字变化"判据）。 */
+        java.util.List<String> lastText = null;
         /** 上一轮快照（ref → 节点摘要），用于差分。 */
         Map<String, JSONObject> lastNodes = new LinkedHashMap<String, JSONObject>();
         /** 是否已经有过快照（没有快照时 click/type 要被拒）。 */
@@ -203,7 +210,7 @@ public final class BrowserHost {
             return e.toString();
         }
         if ("open".equals(name)) return doOpen(a.optString("url", ""), a.optBoolean("newTab", false));
-        if ("snapshot".equals(name)) return doSnapshot(a.optLong("since", -1L));
+        if ("snapshot".equals(name)) return doSnapshot(a.optLong("since", -1L), a.optBoolean("includeText", false));
         if ("find".equals(name)) return doFind(a);
         if ("click".equals(name)) return doClick(a);
         if ("type".equals(name)) return doType(a);
@@ -274,6 +281,9 @@ public final class BrowserHost {
             @Override
             public void onPageStarted(WebView v, String url, Bitmap favicon) {
                 t.st.generation++;
+                t.st.navGen++;
+                t.st.mut = -1;              // 新页面：变更计数与文本基线都作废
+                t.st.lastText = null;
                 t.st.hasSnapshot = false;
                 t.st.lastNodes.clear();
                 t.st.pageReady = false;
@@ -512,22 +522,40 @@ public final class BrowserHost {
     private static final String TYPE_JS_FMT =
         "(function(){var el=document.querySelector('[data-dsh-ref=\"__REF__\"]');"
       + "if(!el)return JSON.stringify({ok:false,reason:'stale-ref'});"
-      + "var text=__TEXT__,replace=__REPLACE__,done=false;"
+      + "var text=__TEXT__,replace=__REPLACE__,done=false,via='';"
       + "try{el.focus();}catch(e){}"
       + "try{if(replace&&el.select)el.select();done=document.execCommand('insertText',false,text);}catch(e){done=false;}"
+      + "if(done){via='execCommand';}"
       + "if(!done){try{var proto=(el.tagName==='TEXTAREA')?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;"
       + "var setter=Object.getOwnPropertyDescriptor(proto,'value');"
       + "var next=replace?text:(String(el.value||'')+text);"
       + "if(setter&&setter.set){setter.set.call(el,next);}else{el.value=next;}"
       + "el.dispatchEvent(new Event('input',{bubbles:true}));"
-      + "el.dispatchEvent(new Event('change',{bubbles:true}));done=true;}catch(e2){done=false;}}"
+      + "el.dispatchEvent(new Event('change',{bubbles:true}));done=true;via='setter';}catch(e2){done=false;}}"
       + "var v=String(el.value===undefined?'':el.value).slice(0,200);"
-      + "return JSON.stringify({ok:done,value:v,reason:done?'':'type-failed'});})()";
+      + "return JSON.stringify({ok:done,value:v,via:via,dispatched:done,reason:done?'':'type-failed'});})()";
 
+    /**
+     * 取文（v1.20.1，AI 建议③）：命中 input/textarea/select 时返回**结构化字段**。
+     * 旧实现只读 innerText/textContent —— input 的值在 value 属性里，于是刚写进去的内容
+     * 被读成 "(空)"，AI 会以为输入被清空/控件是假的，进而重复键入。
+     */
     private static final String TEXT_JS_FMT =
         "(function(){var el=__REF__?document.querySelector('[data-dsh-ref=\"'+__REF__+'\"]'):null;"
-      + "var t=el?(el.innerText||el.textContent||''):(document.body?(document.body.innerText||document.body.textContent||''):'');"
-      + "return JSON.stringify({text:String(t).replace(/\\n{3,}/g,'\\n\\n'),ref:__REF__||''});})()";
+      + "if(!el){var b=document.body?(document.body.innerText||document.body.textContent||''):'';"
+      + "return JSON.stringify({text:String(b).replace(/\\n{3,}/g,'\\n\\n'),ref:__REF__||''});}"
+      + "var tag=(el.tagName||'').toUpperCase();"
+      + "var isField=(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT');"
+      + "var val=isField?String(el.value===undefined?'':el.value):'';"
+      + "if(tag==='SELECT'&&el.selectedIndex>=0&&el.options&&el.options[el.selectedIndex]){"
+      + "var op=el.options[el.selectedIndex];val=String(op.text||op.value||'');}"
+      + "var txt=String(el.innerText||el.textContent||'');"
+      + "if(isField&&!txt){txt='';}"
+      + "return JSON.stringify({text:txt,ref:__REF__||'',tag:tag.toLowerCase(),"
+      + "type:String((el.getAttribute&&el.getAttribute('type'))||'').toLowerCase(),"
+      + "value:val,placeholder:String((el.getAttribute&&el.getAttribute('placeholder'))||''),"
+      + "disabled:!!(el.disabled||(el.getAttribute&&el.getAttribute('aria-disabled')==='true')),"
+      + "field:isField});})()";
 
     private static final String SCROLL_JS_FMT =
         "(function(){window.scrollBy(0,__DY__);return JSON.stringify({scrollY:window.scrollY||0,"
@@ -544,6 +572,38 @@ public final class BrowserHost {
       + "try{s+='|'+(document.body?String(document.body.innerText||'').slice(0,4000):'');}catch(e){}"
       + "var h=0x811c9dc5;for(var j=0;j<s.length;j++){h^=s.charCodeAt(j);h=(h*0x01000193)>>>0;}"
       + "return JSON.stringify({url:location.href,title:document.title||'',inView:n,fp:('0000000'+h.toString(16)).slice(-7)});})()";
+
+    /**
+     * 页面变更计数（v1.20.1，AI 测试员建议②）：
+     * 旧实现里 pageGeneration 只在"导航/重载"时 +1，点击后的 DOM 变化一代都不动 ——
+     * 于是 browser_click 说"页面有变化"、紧接着 snapshot 的 generation 却没变，
+     * 调用方拿 since 做差分只能得到假阴性。这里用 MutationObserver（监听
+     * childList / characterData / 关键属性）+ input/change 事件把"任意 DOM 变更"计进 window.__dshMut，
+     * Java 侧再由 syncGeneration() 折算进 pageGeneration。
+     * 只监听 value/checked/selected/disabled/href/src/class 这几个属性，避免动画改 style 把计数刷爆。
+     */
+    private static final String MUT_JS =
+        "(function(){if(window.__dshMut===undefined){window.__dshMut=0;"
+      + "try{var mo=new MutationObserver(function(){window.__dshMut++;});"
+      + "mo.observe(document.documentElement,{subtree:true,childList:true,characterData:true,"
+      + "attributes:true,attributeFilter:['value','checked','selected','disabled','href','src','class']});"
+      + "document.addEventListener('input',function(){window.__dshMut++;},true);"
+      + "document.addEventListener('change',function(){window.__dshMut++;},true);"
+      + "window.__dshMo=mo;}catch(e){}}"
+      + "return String(window.__dshMut||0);})()";
+
+    /**
+     * 可见文本行（v1.20.1，AI 测试员建议①/③）：
+     * body.innerText 按行切、去空行/去重、单行截断到 200 字、最多 __MAX__ 行。
+     * 提交后的回显（如 "CLICKED:xxx"）通常没有可交互角色，旧快照里完全看不到 ——
+     * 这份文本清单让 snapshot{includeText} 与 click 的 newText 能把"提交成功了吗"变成可核对的证据。
+     */
+    private static final String TEXT_LINES_JS_FMT =
+        "(function(){var t=document.body?String(document.body.innerText||''):'';"
+      + "var a=t.split(/\\n+/),out=[],seen={};"
+      + "for(var i=0;i<a.length&&out.length<__MAX__;i++){var s=a[i].replace(/^\\s+|\\s+$/g,'');"
+      + "if(!s)continue;if(s.length>200)s=s.slice(0,200);if(seen[s])continue;seen[s]=1;out.push(s);}"
+      + "return JSON.stringify({lines:out});})()";
 
     // ==================== JS 调用 ====================
 
@@ -588,6 +648,62 @@ public final class BrowserHost {
             }
         }
         return v;
+    }
+
+    // ==================== v1.20.1：代次同步 / 可见文本 ====================
+
+    /** 读页面变更计数（window.__dshMut）。拿不到回 -1（老页面/JS 失败时不影响原逻辑）。 */
+    private long mutCounter() {
+        String raw = evalJs(MUT_JS, 4000);
+        if (raw == null) return -1L;
+        try {
+            return Long.parseLong(raw.replace("\"", "").trim());
+        } catch (Throwable t) {
+            return -1L;
+        }
+    }
+
+    /**
+     * 把"页面真的变了"折算进 pageGeneration（AI 建议②）。
+     * 只在计数**变化**时 +1；返回当前代次。首次同步只记基线、不 +1（避免开页就跳）。
+     */
+    private long syncGeneration() {
+        long m = mutCounter();
+        if (m >= 0) {
+            if (st.mut >= 0 && m != st.mut) st.generation++;
+            st.mut = m;
+        }
+        return st.generation;
+    }
+
+    /** 当前可见文本行（最多 max 行）。失败回 null。 */
+    private JSONArray textLines(int max) {
+        String raw = evalJs(TEXT_LINES_JS_FMT.replace("__MAX__", String.valueOf(max)), 6000);
+        if (raw == null) return null;
+        try {
+            return new JSONObject(raw).optJSONArray("lines");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static List<String> linesOf(JSONArray a) {
+        List<String> out = new ArrayList<String>();
+        if (a == null) return out;
+        for (int i = 0; i < a.length(); i++) out.add(a.optString(i, ""));
+        return out;
+    }
+
+    /** after 里"before 没有"的行（保持页面顺序，最多 cap 行）。 */
+    private static JSONArray newLinesSince(List<String> before, JSONArray after, int cap) {
+        JSONArray out = new JSONArray();
+        if (after == null) return out;
+        java.util.Set<String> old = new java.util.HashSet<String>(before == null ? new ArrayList<String>() : before);
+        for (int i = 0; i < after.length() && out.length() < cap; i++) {
+            String s = after.optString(i, "");
+            if (s.length() > 0 && !old.contains(s)) out.put(s);
+        }
+        return out;
     }
 
     static String jsString(String s) {
@@ -640,6 +756,9 @@ public final class BrowserHost {
         notes.put("同进程同数据目录：不承诺 cookie 隔离（阶段 A2 剩余项：挪到独立进程 :browser）");
         notes.put("禁止访问回环地址与引擎端口");
         notes.put("snapshot 支持差分（since）；find 命中的元素会自动打 ref，找到即可点");
+        notes.put("snapshot{includeText:true} 附带可见文本（提交回显也能看到）；点击/按键会回 newText");
+        notes.put("pageGeneration 会随 DOM 变化递增（不只是导航）；click 回 fromGeneration/toGeneration");
+        notes.put("read 命中输入框回结构化字段（tag/type/value/placeholder/disabled）；type 回 via 与 dispatched");
         put(o, "notes", notes);
         return o.toString();
     }
@@ -810,14 +929,17 @@ public final class BrowserHost {
         return m;
     }
 
-    private String doSnapshot(long since) {
-        long started = st.generation;
+    private String doSnapshot(long since, boolean includeText) {
+        long nav0 = st.navGen;
+        syncGeneration();
         JSONObject snap = rawSnapshot();
         if (snap == null) return err("snapshot-failed", "快照脚本没有返回（页面可能在导航中）");
-        if (st.generation != started) return err("stale-page-generation", "快照期间页面导航了，请重新快照");
+        // v1.20.1：只看"导航"判据（navGen）。DOM 变更会让 generation+1，但那是正常的、不该报 stale。
+        if (st.navGen != nav0) return err("stale-page-generation", "快照期间页面导航了，请重新快照");
         JSONArray nodes = snap.optJSONArray("nodes");
         Map<String, JSONObject> now = indexNodes(nodes);
         boolean full = (since < 0) || st.lastNodes.isEmpty();
+        JSONArray textNow = textLines(60);           // 可见文本：includeText 与"纯文字变化"判据共用
         JSONObject o = ok();
         put(o, "surface", "browser");
         put(o, "tabId", activeTabId);
@@ -826,6 +948,9 @@ public final class BrowserHost {
         put(o, "title", snap.optString("title", st.title));
         put(o, "viewport", snap.optJSONObject("viewport") == null ? viewportJson() : snap.optJSONObject("viewport"));
         put(o, "refScheme", "stable-fingerprint");
+        if (includeText) {
+            put(o, "text", textNow == null ? new JSONArray() : textNow);
+        }
         if (full) {
             put(o, "full", true);
             put(o, "nodes", nodes == null ? new JSONArray() : nodes);
@@ -848,19 +973,27 @@ public final class BrowserHost {
                 }
             }
             for (String r : st.lastNodes.keySet()) if (!now.containsKey(r)) removed.add(r);
+            // v1.20.1：文字变化也算变化（提交后的回显往往只有文字，没有新可交互节点）
+            JSONArray newText = newLinesSince(st.lastText, textNow, 8);
             put(o, "full", false);
             put(o, "added", added);
             put(o, "removed", new JSONArray(removed));
             put(o, "changed", changed);
             put(o, "unchangedCount", now.size() - added.length() - changed.length());
             put(o, "nodeCount", now.size());
-            if (added.length() == 0 && changed.length() == 0 && removed.isEmpty()) {
+            if (newText.length() > 0) {
+                put(o, "newText", newText);
+                put(o, "textChanged", true);
+            }
+            if (added.length() == 0 && changed.length() == 0 && removed.isEmpty() && newText.length() == 0) {
                 put(o, "unchanged", true);   // 零差异：几十 token 就够
             }
         }
         st.lastNodes = now;
+        st.lastText = linesOf(textNow);
         st.hasSnapshot = true;
         Log.i(TAG, "snapshot: gen=" + st.generation + " nodes=" + now.size() + " full=" + full
+                + " text=" + (textNow == null ? -1 : textNow.length())
                 + " sample=" + now.keySet().toString());
         return o.toString();
     }
@@ -891,6 +1024,7 @@ public final class BrowserHost {
         if (limit <= 0) limit = FIND_DEFAULT;
         if (limit > FIND_MAX) limit = FIND_MAX;
         String ql = q.toLowerCase();
+        syncGeneration();                 // v1.20.1：find 也回新代次（DOM 变过就 +1）
         JSONObject snap = rawSnapshot();
         if (snap == null) return err("find-failed", "页面快照失败（可能在导航中）");
         JSONArray nodes = snap.optJSONArray("nodes");
@@ -1010,6 +1144,8 @@ public final class BrowserHost {
             return refFailure(bad, ref);
         }
         JSONObject before = pageFp();
+        long g0 = syncGeneration();
+        JSONArray textBefore = textLines(60);      // v1.20.1：点击前的可见文本（算 newText 的基线）
         JSONObject rr = resolveRef(ref);
         if (rr == null || !rr.optBoolean("found", false)) {
             Log.i(TAG, "click 被拒: path=resolveRef ref=" + ref + " rr=" + (rr == null ? "null(JS 无返回)" : rr.toString())
@@ -1057,14 +1193,27 @@ public final class BrowserHost {
             changed = !sameFp(before, after);
             if (shown) via = "touch+js";
         }
+        // v1.20.1（AI 建议①②）：DOM 文字变化也算变化；并回传 from/to 代次与新增文本，
+        // 让"提交是否成功"一次调用就能确认（不必再 read 一次）。
+        long g1 = syncGeneration();
+        JSONArray textAfter = textLines(60);
+        JSONArray newText = newLinesSince(linesOf(textBefore), textAfter, 8);
+        if (newText.length() > 0) changed = true;
+        if (g1 != g0) changed = true;
+        // v1.20.1：**不**把基线更新到点击后 —— 基线留在点击前，后面 snapshot{since}
+        // 才能把这次点击带来的文字变化算进 newText（与 click 自己回的那份一致，不会自相矛盾）。
+        if (st.lastText == null && textBefore != null) st.lastText = linesOf(textBefore);
         JSONObject o = ok();
         put(o, "ref", ref);
         put(o, "via", via);
         put(o, "clickedAt", new JSONArray().put(Math.round(vx)).put(Math.round(vy)));
         put(o, "changed", changed);
+        put(o, "fromGeneration", g0);
+        put(o, "toGeneration", g1);
+        if (newText.length() > 0) put(o, "newText", newText);
         put(o, "url", after == null ? st.url : after.optString("url", st.url));
         put(o, "title", after == null ? st.title : after.optString("title", st.title));
-        put(o, "pageGeneration", st.generation);
+        put(o, "pageGeneration", g1);
         put(o, "loadState", st.loadState);
         if (!changed) put(o, "hint", "页面没变化：可能不是可点元素、或点击被遮挡；可用 browser_snapshot{since} 复核");
         else put(o, "delta", minimalDelta());
@@ -1078,6 +1227,7 @@ public final class BrowserHost {
         String text = a.optString("text", "");
         boolean replace = a.optBoolean("replace", true);
         if (text.length() == 0 && !a.has("text")) return err("text-required", "需要 text（可以是空串，表示清空）");
+        long g0 = syncGeneration();
         JSONObject before = pageFp();
         // 同 resolveRef：这条串也不能少了公共函数（否则同样变成一个假 stale-ref）
         String js = "(function(){" + JS_COMMON + "return " + TYPE_JS_FMT.replace("__REF__", ref)
@@ -1093,11 +1243,16 @@ public final class BrowserHost {
             return err(why, "写入失败（元素可能是只读/被禁用）");
         }
         JSONObject after = pageFp();
+        long g1 = syncGeneration();
         JSONObject o = ok();
         put(o, "ref", ref);
         put(o, "value", r.optString("value", ""));
-        put(o, "changed", !sameFp(before, after));
-        put(o, "pageGeneration", st.generation);
+        put(o, "via", r.optString("via", ""));                 // v1.20.1：execCommand / setter
+        put(o, "dispatched", r.optBoolean("dispatched", false)); // input/change 事件是否已派发
+        put(o, "changed", !sameFp(before, after) || (g1 != g0));
+        put(o, "fromGeneration", g0);
+        put(o, "toGeneration", g1);
+        put(o, "pageGeneration", g1);
         return o.toString();
     }
 
@@ -1105,6 +1260,7 @@ public final class BrowserHost {
         String key = a.optString("key", "Enter");
         final int code = keyCode(key);
         if (code == 0) return err("unknown-key", "不支持的键：" + key);
+        long g0 = syncGeneration();
         onMainSync(new Runnable() {
             @Override
             public void run() {
@@ -1115,10 +1271,18 @@ public final class BrowserHost {
         });
         sleep(600);
         JSONObject after = pageFp();
+        long g1 = syncGeneration();
+        JSONArray textAfter = textLines(60);
+        JSONArray newText = newLinesSince(st.lastText, textAfter, 8);
+        // 同 doClick：基线只在"还没有基线"时补，不在按键后前移，保证 snapshot{since} 能看到这次变化。
+        if (st.lastText == null && textAfter != null) st.lastText = linesOf(textAfter);
         JSONObject o = ok();
         put(o, "key", key);
         put(o, "url", after == null ? st.url : after.optString("url", st.url));
-        put(o, "pageGeneration", st.generation);
+        put(o, "fromGeneration", g0);
+        put(o, "toGeneration", g1);
+        put(o, "pageGeneration", g1);
+        if (newText.length() > 0) put(o, "newText", newText);
         return o.toString();
     }
 
@@ -1152,12 +1316,17 @@ public final class BrowserHost {
         String js = TEXT_JS_FMT.replace("__REF__", ref.length() > 0 ? jsString(ref) : "null");
         String raw = evalJs(js, 8000);
         if (raw == null) return err("read-failed", "取文脚本没有返回");
-        String text = "";
+        JSONObject r;
         try {
-            text = new JSONObject(raw).optString("text", "");
+            r = new JSONObject(raw);
         } catch (Throwable t) {
             return err("read-parse-failed", "取文结果解析失败");
         }
+        String text = r.optString("text", "");
+        boolean field = r.optBoolean("field", false);
+        String value = r.optString("value", "");
+        // v1.20.1：输入框的"内容"在 value 里，textContent 本来就是空的 —— 直接回 value，别让 AI 以为被清空。
+        if (field && text.trim().length() == 0) text = value;
         boolean truncated = text.length() > MAX_TEXT;
         if (truncated) text = text.substring(0, MAX_TEXT);
         JSONObject o = ok();
@@ -1165,6 +1334,17 @@ public final class BrowserHost {
         put(o, "text", text);
         put(o, "chars", text.length());
         put(o, "truncated", truncated);
+        if (field) {
+            put(o, "field", true);
+            put(o, "tag", r.optString("tag", ""));
+            put(o, "type", r.optString("type", ""));
+            put(o, "value", value);
+            put(o, "placeholder", r.optString("placeholder", ""));
+            put(o, "disabled", r.optBoolean("disabled", false));
+            if (value.length() == 0) {
+                put(o, "hint", "这个输入框当前 value 为空（" + r.optString("tag", "input") + "）；要写入用 browser_type");
+            }
+        }
         if (truncated) put(o, "hint", "已截断；可用 ref 取局部（先用 browser_find 定位）");
         return o.toString();
     }
