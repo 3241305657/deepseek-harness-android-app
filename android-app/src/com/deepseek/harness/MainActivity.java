@@ -4385,8 +4385,16 @@ public class MainActivity extends Activity {
 
     /** 当前安装包的 versionCode（用于判断"内部那棵树是不是本次安装解压的"）。 */
     private int conBuildCode() {
-        try { return (int) getPackageManager().getPackageInfo(getPackageName(), 0).getLongVersionCode(); }
-        catch (Throwable t) { return 0; }
+        // fix(android 8.x)：getLongVersionCode() 是 API 28（Android 9）才有的方法。
+        // 在 API 26/27（Android 7/8）上直接调用会抛 NoSuchMethodError，被下面的 catch 吞成 0，
+        // 于是 conFilesReady() 里的 (payload_build_code == conBuildCode()) 永远为 false：
+        // 控制台永远显示「未解压」，每次冷启动都被迫全量重解压一遍（真机 28121 个文件，1~2 分钟）。
+        // 修法：按 SDK 选方法 —— >=28 用 long 版，<28 用等值的 int versionCode。
+        try {
+            android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            if (Build.VERSION.SDK_INT >= 28) return (int) pi.getLongVersionCode();
+            return pi.versionCode;
+        } catch (Throwable t) { return 0; }
     }
 
     /** 关键文件缺失检查（只查标记文件不够：解压中途失败、文件被杀都不算就绪）。 */
@@ -4409,7 +4417,12 @@ public class MainActivity extends Activity {
         if (conMissingKey() != null) return false;
         int done = 0;
         try { done = getSharedPreferences("dsh_prefs", MODE_PRIVATE).getInt("payload_build_code", 0); } catch (Throwable ignored) {}
-        return done != 0 && done == conBuildCode();
+        if (done == 0) return false;
+        int cur = conBuildCode();
+        // fix(android 8.x)：拿不到版本号（老系统/异常）时退回「关键文件齐全即就绪」，
+        // 宁可显示「已解压」，也不要把用户永久锁死在「未解压 → 每次全量重解压」里。
+        if (cur == 0) return true;
+        return done == cur;
     }
 
     private void conMarkPayloadDone() {
